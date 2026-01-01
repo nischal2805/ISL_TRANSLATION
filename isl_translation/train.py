@@ -16,6 +16,7 @@ import os
 import sys
 import json
 import time
+import math
 import argparse
 import logging
 from datetime import datetime
@@ -27,7 +28,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.cuda.amp import GradScaler, autocast
 from torch.optim import AdamW
-from torch.optim.lr_scheduler import CosineAnnealingLR
+from torch.optim.lr_scheduler import CosineAnnealingLR, LambdaLR
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
@@ -405,13 +406,27 @@ class NaNSafeTrainer:
             eps=1e-8
         )
         
-        # Scheduler
+        # Schedulers - Warmup + Cosine Annealing using LambdaLR for proper sync
         total_steps = len(train_loader) * training_config.num_epochs
-        self.scheduler = CosineAnnealingLR(
-            self.optimizer,
-            T_max=total_steps,
-            eta_min=1e-6
-        )
+        warmup_steps = len(train_loader) * training_config.warmup_epochs
+        
+        self.warmup_steps = warmup_steps
+        self.total_steps = total_steps
+        self.base_lr = training_config.learning_rate
+        self.min_lr = training_config.min_lr
+        
+        # Combined warmup + cosine schedule using LambdaLR (Bug #6 fix)
+        def lr_lambda(step):
+            if step < warmup_steps:
+                # Linear warmup
+                return (step + 1) / warmup_steps
+            else:
+                # Cosine annealing after warmup
+                progress = (step - warmup_steps) / max(total_steps - warmup_steps, 1)
+                cosine_decay = 0.5 * (1 + math.cos(math.pi * progress))
+                return self.min_lr / self.base_lr + (1 - self.min_lr / self.base_lr) * cosine_decay
+        
+        self.scheduler = LambdaLR(self.optimizer, lr_lambda)
         
         # Mixed precision
         self.scaler = GradScaler(enabled=training_config.use_amp)
@@ -535,7 +550,7 @@ class NaNSafeTrainer:
             self.scaler.unscale_(self.optimizer)
             grad_norm = torch.nn.utils.clip_grad_norm_(
                 self.model.parameters(),
-                max_norm=training_config.gradient_clip
+                max_norm=training_config.max_grad_norm
             )
             
             # Check gradient health
@@ -550,6 +565,8 @@ class NaNSafeTrainer:
             # ============================================================
             self.scaler.step(self.optimizer)
             self.scaler.update()
+            
+            # Learning rate scheduling - LambdaLR handles warmup + cosine internally
             self.scheduler.step()
             
             # Update schedulers
@@ -619,12 +636,12 @@ class NaNSafeTrainer:
             if not check_tensor_health(features, "features"):
                 continue
             
-            # Forward pass
+            # Forward pass with teacher forcing=1.0 for consistent loss computation
             outputs = self.model(
                 features,
                 feature_lengths,
                 targets,
-                teacher_forcing_ratio=0.0  # No teacher forcing for validation
+                teacher_forcing_ratio=1.0  # Use teacher forcing for loss computation
             )
             
             ctc_logits = outputs['ctc_logits']
@@ -647,8 +664,13 @@ class NaNSafeTrainer:
                 val_losses['ce_loss'] += loss_dict['ce_loss']
                 num_batches += 1
             
-            # Decode for WER computation
-            predicted_ids = outputs['decoder_logits'].argmax(dim=-1)
+            # Use proper greedy decoding for WER computation (Bug #4 fix)
+            # This gives a true measure of model's autoregressive generation ability
+            predicted_ids, _ = self.model.decode(
+                features, 
+                feature_lengths, 
+                max_len=targets.size(1)
+            )
             
             for i in range(predicted_ids.size(0)):
                 pred_tokens = predicted_ids[i].tolist()
@@ -666,16 +688,9 @@ class NaNSafeTrainer:
             for key in val_losses:
                 val_losses[key] /= num_batches
         
-        # Compute WER
+        # Compute WER - compute_wer expects lists of strings
         if len(all_predictions) > 0:
-            total_errors = 0
-            total_words = 0
-            for pred, ref in zip(all_predictions, all_references):
-                wer = compute_wer(pred, ref)
-                total_errors += wer * len(ref.split())
-                total_words += len(ref.split())
-            
-            val_losses['wer'] = total_errors / max(total_words, 1)
+            val_losses['wer'] = compute_wer(all_predictions, all_references)
         else:
             val_losses['wer'] = 1.0
         
@@ -805,18 +820,19 @@ def main():
     print(f"Vocabulary size: {vocab.size}")
     
     # Create dataloaders
-    train_loader, val_loader = create_dataloaders(
-        csv_path=data_config.csv_path,
+    metadata_path = os.path.join(data_config.processed_dir, 'metadata.csv')
+    train_loader, val_loader, test_loader = create_dataloaders(
+        metadata_path=metadata_path,
         features_dir=data_config.processed_dir,
         vocab=vocab,
         batch_size=training_config.batch_size,
-        num_workers=training_config.num_workers,
-        max_samples=data_config.max_samples
+        num_workers=4,  # Use fixed value or add to config
+        use_augmentation=True  # Enable data augmentation for training
     )
-    print(f"Train batches: {len(train_loader)}, Val batches: {len(val_loader)}")
+    print(f"Train batches: {len(train_loader)}, Val batches: {len(val_loader)}, Test batches: {len(test_loader)}")
     
     # Create model
-    model = create_model(vocab.size)
+    model = create_model()  # Uses model_config by default
     print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
     
     # Create trainer and train

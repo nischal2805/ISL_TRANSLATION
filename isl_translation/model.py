@@ -31,7 +31,11 @@ class PositionalEncoding(nn.Module):
         div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
         
         pe[:, 0::2] = torch.sin(position * div_term)
-        pe[:, 1::2] = torch.cos(position * div_term)
+        # Handle odd d_model: cos positions may have one fewer element
+        if d_model % 2 == 0:
+            pe[:, 1::2] = torch.cos(position * div_term)
+        else:
+            pe[:, 1::2] = torch.cos(position * div_term[:, :-1]) if div_term.size(-1) > pe[:, 1::2].size(-1) else torch.cos(position * div_term)
         pe = pe.unsqueeze(0)  # (1, max_len, d_model)
         
         self.register_buffer('pe', pe)
@@ -339,6 +343,16 @@ class ISLEncoder(nn.Module):
             encoder_output: (B, T', d_model)
             output_lengths: (B,) updated lengths after subsampling
         """
+        # Ensure minimum sequence length (at least 4 frames for subsampling + conv)
+        min_seq_len = 4
+        if x.size(1) < min_seq_len:
+            # Pad short sequences
+            padding = torch.zeros(x.size(0), min_seq_len - x.size(1), x.size(2), 
+                                  device=x.device, dtype=x.dtype)
+            x = torch.cat([x, padding], dim=1)
+            if lengths is not None:
+                lengths = lengths.clamp(min=min_seq_len)
+        
         # Input projection
         x = self.input_proj(x)  # (B, T, d_model)
         
@@ -348,6 +362,10 @@ class ISLEncoder(nn.Module):
         
         # Temporal subsampling
         x, lengths = self.subsample(x, lengths)
+        
+        # Ensure lengths are at least 1 after subsampling
+        if lengths is not None:
+            lengths = lengths.clamp(min=1)
         
         # Positional encoding
         x = self.pos_encoder(x)
@@ -531,7 +549,7 @@ class GRUDecoder(nn.Module):
             # Prepare next input
             if t < max_len - 1:
                 use_teacher_forcing = torch.rand(1).item() < teacher_forcing_ratio
-                if use_teacher_forcing:
+                if use_teacher_forcing and t + 1 < targets.size(1):
                     input_token = targets[:, t + 1].unsqueeze(1)
                 else:
                     input_token = logits.argmax(dim=-1)
@@ -601,6 +619,136 @@ class GRUDecoder(nn.Module):
             input_token = next_token.unsqueeze(1)
         
         return output_ids, output_probs
+    
+    def decode_beam(
+        self,
+        encoder_output: torch.Tensor,
+        encoder_mask: Optional[torch.Tensor] = None,
+        max_len: int = 100,
+        beam_width: int = 5,
+        sos_id: int = 1,
+        eos_id: int = 2,
+        length_penalty: float = 0.6
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Beam search decoding for inference.
+        
+        Args:
+            encoder_output: (B, T, d_model) - only B=1 supported for beam search
+            encoder_mask: (B, T) padding mask
+            max_len: Maximum output length
+            beam_width: Number of beams to keep
+            sos_id: Start-of-sequence token ID
+            eos_id: End-of-sequence token ID
+            length_penalty: Length normalization factor (alpha)
+            
+        Returns:
+            output_ids: (B, L) decoded token IDs (best beam)
+            output_probs: (B,) sequence log probability
+        """
+        batch_size = encoder_output.size(0)
+        device = encoder_output.device
+        
+        # For simplicity, process one sample at a time
+        if batch_size > 1:
+            all_ids = []
+            all_probs = []
+            for b in range(batch_size):
+                enc_out = encoder_output[b:b+1]
+                enc_mask = encoder_mask[b:b+1] if encoder_mask is not None else None
+                ids, probs = self.decode_beam(
+                    enc_out, enc_mask, max_len, beam_width, sos_id, eos_id, length_penalty
+                )
+                all_ids.append(ids)
+                all_probs.append(probs)
+            
+            # Pad to same length
+            max_out_len = max(ids.size(1) for ids in all_ids)
+            padded_ids = torch.zeros(batch_size, max_out_len, dtype=torch.long, device=device)
+            for b, ids in enumerate(all_ids):
+                padded_ids[b, :ids.size(1)] = ids[0]
+            
+            return padded_ids, torch.cat(all_probs)
+        
+        # Beam search for single sample
+        # Each beam: (sequence, hidden_state, log_prob, finished)
+        
+        # Expand encoder output for beam search
+        encoder_output_expanded = encoder_output.repeat(beam_width, 1, 1)  # (beam, T, d)
+        encoder_mask_expanded = encoder_mask.repeat(beam_width, 1) if encoder_mask is not None else None
+        
+        # Initialize beams
+        beams = [{
+            'tokens': [sos_id],
+            'log_prob': 0.0,
+            'hidden': None,
+            'finished': False
+        }]
+        
+        for t in range(max_len):
+            all_candidates = []
+            
+            for beam in beams:
+                if beam['finished']:
+                    all_candidates.append(beam)
+                    continue
+                
+                # Get last token
+                input_token = torch.tensor([[beam['tokens'][-1]]], dtype=torch.long, device=device)
+                
+                # Embed
+                embedded = self.embedding(input_token)
+                
+                # GRU step
+                gru_out, hidden = self.gru(embedded, beam['hidden'])
+                
+                # Cross-attention (use first beam's encoder output)
+                context = self.cross_attention(gru_out, encoder_output, encoder_mask)
+                
+                # Output
+                combined = torch.cat([gru_out, context], dim=-1)
+                logits = self.output_proj(combined).squeeze(1)  # (1, vocab_size)
+                log_probs = F.log_softmax(logits, dim=-1).squeeze(0)  # (vocab_size,)
+                
+                # Get top-k candidates
+                topk_log_probs, topk_ids = log_probs.topk(beam_width)
+                
+                for k in range(beam_width):
+                    token_id = topk_ids[k].item()
+                    token_log_prob = topk_log_probs[k].item()
+                    
+                    new_beam = {
+                        'tokens': beam['tokens'] + [token_id],
+                        'log_prob': beam['log_prob'] + token_log_prob,
+                        'hidden': hidden.clone() if hidden is not None else None,  # Clone to prevent interference
+                        'finished': token_id == eos_id
+                    }
+                    all_candidates.append(new_beam)
+            
+            # Select top beams with length normalization
+            def score_beam(b):
+                length = len(b['tokens'])
+                return b['log_prob'] / (length ** length_penalty)
+            
+            all_candidates.sort(key=score_beam, reverse=True)
+            beams = all_candidates[:beam_width]
+            
+            # Check if all beams finished
+            if all(b['finished'] for b in beams):
+                break
+        
+        # Return best beam
+        best_beam = max(beams, key=lambda b: b['log_prob'] / (len(b['tokens']) ** length_penalty))
+        
+        # Remove SOS token from output
+        output_tokens = best_beam['tokens'][1:]  # Remove SOS
+        if output_tokens and output_tokens[-1] == eos_id:
+            output_tokens = output_tokens[:-1]  # Remove EOS
+        
+        output_ids = torch.tensor([output_tokens], dtype=torch.long, device=device)
+        output_prob = torch.tensor([best_beam['log_prob']], device=device)
+        
+        return output_ids, output_prob
 
 
 # ============================================================================
@@ -704,7 +852,9 @@ class ISLTranslationModel(nn.Module):
         features: torch.Tensor,
         feature_lengths: Optional[torch.Tensor] = None,
         max_len: int = 100,
-        use_ctc: bool = False
+        use_ctc: bool = False,
+        beam_width: int = 1,
+        length_penalty: float = 0.6
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Inference decoding.
@@ -714,10 +864,12 @@ class ISLTranslationModel(nn.Module):
             feature_lengths: (B,) input lengths (optional)
             max_len: Maximum output length
             use_ctc: If True, use CTC decoding; otherwise GRU decoder
+            beam_width: Beam width for beam search (1 = greedy)
+            length_penalty: Length normalization for beam search
             
         Returns:
             output_ids: (B, L) decoded token IDs
-            output_probs: (B, L) token probabilities
+            output_probs: (B, L) or (B,) token probabilities
         """
         # Encode
         encoder_output, encoder_lengths = self.encoder(features, feature_lengths)
@@ -736,12 +888,23 @@ class ISLTranslationModel(nn.Module):
         else:
             encoder_mask = None
         
-        # GRU greedy decoding
-        return self.decoder.decode_greedy(
-            encoder_output, encoder_mask, max_len,
-            sos_id=vocab_config.sos_id,
-            eos_id=vocab_config.eos_id
-        )
+        # Choose decoding strategy
+        if beam_width > 1:
+            # Beam search decoding
+            return self.decoder.decode_beam(
+                encoder_output, encoder_mask, max_len,
+                beam_width=beam_width,
+                sos_id=vocab_config.sos_id,
+                eos_id=vocab_config.eos_id,
+                length_penalty=length_penalty
+            )
+        else:
+            # Greedy decoding
+            return self.decoder.decode_greedy(
+                encoder_output, encoder_mask, max_len,
+                sos_id=vocab_config.sos_id,
+                eos_id=vocab_config.eos_id
+            )
     
     def count_parameters(self) -> int:
         """Count trainable parameters."""
@@ -795,10 +958,28 @@ if __name__ == "__main__":
     print(f"Decoder logits shape: {outputs['decoder_logits'].shape}")
     print(f"Encoder lengths: {outputs['encoder_lengths']}")
     
-    # Test inference
-    print("\nTesting inference...")
+    # Test inference - Greedy
+    print("\nTesting greedy decoding...")
     model.eval()
     with torch.no_grad():
         output_ids, output_probs = model.decode(features[:1], feature_lengths[:1])
-        print(f"Output IDs shape: {output_ids.shape}")
-        print(f"Output probs shape: {output_probs.shape}")
+        print(f"Greedy - Output IDs shape: {output_ids.shape}")
+        print(f"Greedy - Output probs shape: {output_probs.shape}")
+    
+    # Test inference - Beam Search
+    print("\nTesting beam search decoding (beam_width=5)...")
+    with torch.no_grad():
+        output_ids, output_probs = model.decode(
+            features[:1], feature_lengths[:1], 
+            beam_width=5, length_penalty=0.6
+        )
+        print(f"Beam Search - Output IDs shape: {output_ids.shape}")
+        print(f"Beam Search - Output probs shape: {output_probs.shape}")
+    
+    # Test with short sequence (edge case)
+    print("\nTesting short sequence handling (3 frames)...")
+    short_features = torch.randn(1, 3, 414)
+    short_lengths = torch.tensor([3])
+    with torch.no_grad():
+        output_ids, _ = model.decode(short_features, short_lengths)
+        print(f"Short sequence handled successfully, output shape: {output_ids.shape}")

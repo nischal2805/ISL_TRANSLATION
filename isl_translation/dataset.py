@@ -75,13 +75,13 @@ class ISLDataset(Dataset):
         if features.shape[0] > self.max_src_len:
             features = features[:self.max_src_len]
         
-        # Encode text
+        # Encode text with SOS/EOS tokens for proper sequence learning
         text = row['text']
-        target_ids = self.vocab.encode(text)
+        target_ids = self.vocab.encode(text, add_sos=True, add_eos=True)
         
-        # Truncate target if needed
+        # Truncate target if needed (preserve SOS at start, add EOS at end)
         if len(target_ids) > self.max_tgt_len:
-            target_ids = target_ids[:self.max_tgt_len - 1] + [self.vocab.eos_id]
+            target_ids = [self.vocab.sos_id] + target_ids[1:self.max_tgt_len - 1] + [self.vocab.eos_id]
         
         return {
             'features': torch.tensor(features, dtype=torch.float32),
@@ -159,7 +159,8 @@ def create_dataloaders(
     vocab: Vocabulary,
     batch_size: Optional[int] = None,
     num_workers: int = 4,
-    pin_memory: bool = True
+    pin_memory: bool = True,
+    use_augmentation: bool = True
 ) -> Tuple[DataLoader, DataLoader, DataLoader]:
     """
     Create train, validation, and test dataloaders.
@@ -171,16 +172,24 @@ def create_dataloaders(
         batch_size: Batch size (uses config default if None)
         num_workers: Number of data loading workers
         pin_memory: Whether to pin memory for CUDA
+        use_augmentation: Whether to use data augmentation for training
         
     Returns:
         Tuple of (train_loader, val_loader, test_loader)
     """
     batch_size = batch_size or training_config.batch_size
     
-    # Create datasets
-    train_dataset = ISLDataset(
-        metadata_path, features_dir, vocab, split='train'
-    )
+    # Create datasets - use AugmentedDataset for training if requested
+    if use_augmentation:
+        train_dataset = AugmentedDataset(
+            metadata_path, features_dir, vocab, split='train',
+            augment=True, noise_std=0.02, time_warp_prob=0.3, dropout_prob=0.1
+        )
+    else:
+        train_dataset = ISLDataset(
+            metadata_path, features_dir, vocab, split='train'
+        )
+    
     val_dataset = ISLDataset(
         metadata_path, features_dir, vocab, split='val'
     )
@@ -261,11 +270,11 @@ class StreamingDataset(Dataset):
         if features.shape[0] > self.max_src_len:
             features = features[:self.max_src_len]
         
-        # Encode text
-        target_ids = self.vocab.encode(item['text'])
+        # Encode text with SOS/EOS tokens for proper sequence learning
+        target_ids = self.vocab.encode(item['text'], add_sos=True, add_eos=True)
         
         if len(target_ids) > self.max_tgt_len:
-            target_ids = target_ids[:self.max_tgt_len - 1] + [self.vocab.eos_id]
+            target_ids = [self.vocab.sos_id] + target_ids[1:self.max_tgt_len - 1] + [self.vocab.eos_id]
         
         return {
             'features': torch.tensor(features, dtype=torch.float32),
@@ -314,7 +323,8 @@ def augment_features(
     # Frame dropout
     if dropout_prob > 0:
         mask = np.random.random(augmented.shape[0]) > dropout_prob
-        if mask.sum() > 0:
+        # Ensure at least 4 frames remain for CTC (Bug #14 fix)
+        if mask.sum() >= 4:
             augmented = augmented[mask]
     
     return augmented.astype(np.float32)

@@ -102,14 +102,15 @@ class Vocabulary:
         Returns:
             Decoded text string
         """
-        special_ids = {self.pad_id, self.sos_id, self.eos_id}
+        special_ids = {self.pad_id, self.sos_id}  # Don't include eos_id here - check it first
         
         chars = []
         for id in ids:
-            if remove_special and id in special_ids:
-                continue
+            # Check EOS first before filtering specials (Bug #11 fix)
             if id == self.eos_id:
                 break
+            if remove_special and id in special_ids:
+                continue
             if id in self.id2token:
                 chars.append(self.id2token[id])
             else:
@@ -135,8 +136,9 @@ class Vocabulary:
                 collapsed.append(id)
                 prev_id = id
         
-        # Remove blank tokens
-        filtered = [id for id in collapsed if id != self.blank_id]
+        # Remove blank and special tokens (Bug #12 fix)
+        special_for_ctc = {self.blank_id, self.sos_id, self.eos_id, self.pad_id}
+        filtered = [id for id in collapsed if id not in special_for_ctc]
         
         # Decode to text
         return self.decode(filtered, remove_special=True)
@@ -165,7 +167,7 @@ if __name__ == "__main__":
     print(f"Decoded: '{decoded}'")
     
     # Test CTC decoding
-    ctc_output = [0, 12, 12, 12, 9, 0, 0, 16, 16, 16, 16, 0, 20, 0]  # 'hello' with blanks/repeats
+    ctc_output = [0, 12, 12, 12, 9, 0, 0, 16, 16, 16, 16, 0,12 20, 0]  # 'hello' with blanks/repeats
     ctc_decoded = vocab.ctc_decode(ctc_output)
     print(f"\nCTC output: {ctc_output}")
     print(f"CTC decoded: '{ctc_decoded}'")
