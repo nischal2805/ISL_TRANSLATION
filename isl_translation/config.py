@@ -4,27 +4,32 @@ ISL Translation System - Configuration
 Central configuration file for all hyperparameters and settings.
 """
 
+import os
 import torch
 from dataclasses import dataclass, field
 from typing import List, Optional
 from pathlib import Path
 
+# Get the project root directory (parent of isl_translation folder)
+_SCRIPT_DIR = Path(__file__).parent.resolve()
+_PROJECT_ROOT = _SCRIPT_DIR.parent
+
 
 @dataclass
 class DataConfig:
     """Data pipeline configuration."""
-    # Dataset paths - ACTUAL PATHS
-    dataset_root: str = r"E:\5thsem el\APPROACH 2"
-    videos_dir: str = r"E:\iSign-videos_v1.1"
-    annotations_file: str = r"E:\5thsem el\APPROACH 2\iSign_v1.1.csv"
-    csv_path: str = r"E:\5thsem el\APPROACH 2\iSign_v1.1.csv"  # Alias
+    # Dataset paths - LOCAL PATHS (relative to project root)
+    dataset_root: str = str(_PROJECT_ROOT / "data")
+    videos_dir: str = str(_PROJECT_ROOT / "data" / "videos")
+    annotations_file: str = str(_PROJECT_ROOT / "data" / "iSign_v1.1.csv")
+    csv_path: str = str(_PROJECT_ROOT / "data" / "iSign_v1.1.csv")  # Alias
     
-    # Preprocessed data paths
-    preprocessed_dir: str = r"E:\5thsem el\APPROACH 2\preprocessed_data"
-    processed_dir: str = r"E:\5thsem el\APPROACH 2\preprocessed_data"  # Alias
-    train_dir: str = r"E:\5thsem el\APPROACH 2\preprocessed_data\train"
-    val_dir: str = r"E:\5thsem el\APPROACH 2\preprocessed_data\val"
-    test_dir: str = r"E:\5thsem el\APPROACH 2\preprocessed_data\test"
+    # Preprocessed data paths (where .npy landmarks are stored)
+    preprocessed_dir: str = str(_PROJECT_ROOT / "data" / "landmarks")
+    processed_dir: str = str(_PROJECT_ROOT / "data" / "landmarks")  # Alias
+    train_dir: str = str(_PROJECT_ROOT / "data" / "landmarks" / "train")
+    val_dir: str = str(_PROJECT_ROOT / "data" / "landmarks" / "val")
+    test_dir: str = str(_PROJECT_ROOT / "data" / "landmarks" / "test")
     
     # Data splits (70/15/15)
     train_ratio: float = 0.70
@@ -62,7 +67,7 @@ class LandmarkConfig:
     # Dimensions
     num_coords: int = 3  # x, y, z
     position_dims: int = 138  # 46 * 3
-    feature_dims: int = 414   # 138 * 3 (pos + vel + acc)
+    feature_dims: int = 138   # Using positions only (no vel + acc)
     
     # MediaPipe settings
     static_image_mode: bool = False
@@ -75,7 +80,7 @@ class LandmarkConfig:
 class ModelConfig:
     """Model architecture configuration."""
     # Input/Output dimensions
-    input_dim: int = 414      # 138 position * 3 (pos + vel + acc)
+    input_dim: int = 138      # 138 position dims only (no velocity/acceleration)
     d_model: int = 256        # Model dimension (used by create_model)
     hidden_dim: int = 256     # Main hidden dimension (same as d_model)
     embedding_dim: int = 256  # Decoder embedding dimension

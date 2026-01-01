@@ -222,7 +222,7 @@ def batch_inference(
         
         # Pad batch
         max_len = max(batch_lengths)
-        padded_features = torch.zeros(len(batch_paths), max_len, 414)
+        padded_features = torch.zeros(len(batch_paths), max_len, model_config.input_dim)
         
         for j, feat in enumerate(batch_features):
             padded_features[j, :feat.size(0)] = feat

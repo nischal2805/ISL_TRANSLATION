@@ -16,6 +16,8 @@ import numpy as np
 import torch
 import torch.nn as nn
 
+from config import model_config
+
 
 # ============================================================================
 # Random Seed
@@ -122,7 +124,7 @@ def get_model_size_mb(model: nn.Module) -> float:
 def export_to_onnx(
     model: nn.Module,
     output_path: str,
-    input_shape: Tuple[int, ...] = (1, 100, 414),
+    input_shape: Tuple[int, ...] = None,
     opset_version: int = 14
 ):
     """
@@ -134,6 +136,9 @@ def export_to_onnx(
         input_shape: Input tensor shape (batch, time, features)
         opset_version: ONNX opset version
     """
+    if input_shape is None:
+        input_shape = (1, 100, model_config.input_dim)
+    
     model.eval()
     
     dummy_input = torch.randn(*input_shape)

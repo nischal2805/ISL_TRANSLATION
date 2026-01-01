@@ -31,7 +31,7 @@ def test_ctc_head_clamping():
     # Test with normal input
     batch_size = 4
     seq_len = 100
-    features = torch.randn(batch_size, seq_len, 414).to(DEVICE)
+    features = torch.randn(batch_size, seq_len, model_config.input_dim).to(DEVICE)
     lengths = torch.full((batch_size,), seq_len, dtype=torch.long).to(DEVICE)
     targets = torch.randint(3, 30, (batch_size, 15)).to(DEVICE)
     targets[:, 0] = 1  # SOS
@@ -224,7 +224,7 @@ def test_all_masked_attention():
     seq_len = 50
     
     # Features with varying lengths
-    features = torch.randn(batch_size, seq_len, 414).to(DEVICE)
+    features = torch.randn(batch_size, seq_len, model_config.input_dim).to(DEVICE)
     
     # Very short lengths (most of sequence will be masked)
     lengths = torch.tensor([5, 10], dtype=torch.long).to(DEVICE)
@@ -274,7 +274,7 @@ def test_full_forward_backward():
     target_len = 15
     
     # Create batch
-    features = torch.randn(batch_size, seq_len, 414).to(DEVICE)
+    features = torch.randn(batch_size, seq_len, model_config.input_dim).to(DEVICE)
     lengths = torch.randint(50, seq_len, (batch_size,)).to(DEVICE)
     targets = torch.randint(3, 30, (batch_size, target_len)).to(DEVICE)
     targets[:, 0] = 1  # SOS
@@ -363,7 +363,7 @@ def test_multiple_iterations():
         seq_len = torch.randint(50, 150, (1,)).item()
         target_len = torch.randint(5, 20, (1,)).item()
         
-        features = torch.randn(batch_size, seq_len, 414).to(DEVICE)
+        features = torch.randn(batch_size, seq_len, model_config.input_dim).to(DEVICE)
         lengths = torch.randint(30, seq_len, (batch_size,)).to(DEVICE)
         targets = torch.randint(3, 30, (batch_size, target_len)).to(DEVICE)
         targets[:, 0] = 1
