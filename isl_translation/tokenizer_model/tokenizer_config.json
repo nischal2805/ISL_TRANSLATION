@@ -1,0 +1,11 @@
+{
+  "vocab_size": 2000,
+  "model_type": "bpe",
+  "special_tokens": {
+    "pad": 0,
+    "unk": 1,
+    "bos": 2,
+    "eos": 3,
+    "blank": 4
+  }
+}

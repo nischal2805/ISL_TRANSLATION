@@ -186,10 +186,24 @@ class NaNSafeHybridLoss(nn.Module):
         # CTC format: (T, B, V)
         ctc_input = ctc_logits.permute(1, 0, 2)
         
-        # Prepare CTC targets (remove SOS token)
-        ctc_targets = targets[:, 1:]  # Remove SOS
-        ctc_target_lengths = target_lengths - 2  # Subtract SOS and EOS
-        ctc_target_lengths = ctc_target_lengths.clamp(min=1)
+        # Prepare CTC targets (remove BOTH SOS and EOS properly)
+        # targets format: [SOS, char1, char2, ..., charN, EOS, PAD, PAD, ...]
+        # We need: [char1, char2, ..., charN] for CTC
+        ctc_targets_list = []
+        ctc_lens_list = []
+        
+        for i in range(batch_size):
+            tgt_len = target_lengths[i].item()
+            # Extract tokens between SOS (index 0) and EOS (index tgt_len-1)
+            # So we take indices 1 to tgt_len-1 (exclusive)
+            actual_len = max(1, tgt_len - 2)  # Subtract SOS and EOS
+            tgt_tokens = targets[i, 1:1 + actual_len]  # Skip SOS, take actual_len tokens
+            ctc_targets_list.append(tgt_tokens)
+            ctc_lens_list.append(actual_len)
+        
+        # Concatenate for CTC loss (it expects flat targets)
+        ctc_targets_flat = torch.cat(ctc_targets_list)
+        ctc_target_lengths = torch.tensor(ctc_lens_list, dtype=torch.long, device=device)
         
         # CRITICAL: CTC requires encoder_length >= target_length
         # Filter samples that violate this constraint
@@ -204,7 +218,7 @@ class NaNSafeHybridLoss(nn.Module):
             try:
                 per_sample_ctc = self.ctc_loss(
                     ctc_input,
-                    ctc_targets,
+                    ctc_targets_flat,  # Use flat concatenated targets
                     encoder_lengths,
                     ctc_target_lengths
                 )

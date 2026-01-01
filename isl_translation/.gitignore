@@ -16,10 +16,12 @@ dist/
 
 # VSCode
 .vscode/
-
+preprocessed_data
 # Data & Checkpoints
+preprocessed_data/train/
 preprocessed_data/
 runs/
+*.npy
 *.pt
 *.pth
 *.ckpt
