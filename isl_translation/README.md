@@ -44,8 +44,8 @@ pip install mediapipe opencv-python numpy pandas scipy tqdm tensorboard
 ### 2. Preprocess Dataset
 
 ```powershell
-# Set Python path
-$env:PYTHONPATH = "e:\5thsem el\APPROACH 2\isl_translation"
+# Set Python path (optional, if running from project root)
+$env:PYTHONPATH = ".\isl_translation"
 
 # Run preprocessing
 python -c "

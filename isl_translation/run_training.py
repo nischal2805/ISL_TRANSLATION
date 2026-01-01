@@ -16,10 +16,10 @@ from train import Trainer
 
 
 def main():
-    # Configuration - UPDATE THESE PATHS
-    PREPROCESSED_DIR = r"E:\5thsem el\APPROACH 2\preprocessed_data"
-    METADATA_FILE = r"E:\5thsem el\APPROACH 2\preprocessed_data\metadata.csv"
-    OUTPUT_DIR = r"E:\5thsem el\APPROACH 2\checkpoints"
+    # Configuration - relative paths (update as needed)
+    PREPROCESSED_DIR = "./preprocessed_data"
+    METADATA_FILE = "./preprocessed_data/metadata.csv"
+    OUTPUT_DIR = "./checkpoints"
     
     # GPU mode: "small" for RTX 4060, "large" for A100
     GPU_MODE = "small"

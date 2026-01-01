@@ -13,18 +13,18 @@ from pathlib import Path
 @dataclass
 class DataConfig:
     """Data pipeline configuration."""
-    # Dataset paths - ACTUAL PATHS
-    dataset_root: str = r"E:\5thsem el\APPROACH 2"
-    videos_dir: str = r"E:\iSign-videos_v1.1"
-    annotations_file: str = r"E:\5thsem el\APPROACH 2\iSign_v1.1.csv"
-    csv_path: str = r"E:\5thsem el\APPROACH 2\iSign_v1.1.csv"  # Alias
+    # Dataset paths - relative to project root
+    dataset_root: str = "./data"
+    videos_dir: str = "./data/videos"
+    annotations_file: str = "./data/iSign_v1.1.csv"
+    csv_path: str = "./data/iSign_v1.1.csv"  # Alias
     
     # Preprocessed data paths
-    preprocessed_dir: str = r"E:\5thsem el\APPROACH 2\preprocessed_data"
-    processed_dir: str = r"E:\5thsem el\APPROACH 2\preprocessed_data"  # Alias
-    train_dir: str = r"E:\5thsem el\APPROACH 2\preprocessed_data\train"
-    val_dir: str = r"E:\5thsem el\APPROACH 2\preprocessed_data\val"
-    test_dir: str = r"E:\5thsem el\APPROACH 2\preprocessed_data\test"
+    preprocessed_dir: str = "./preprocessed_data"
+    processed_dir: str = "./preprocessed_data"  # Alias
+    train_dir: str = "./preprocessed_data/train"
+    val_dir: str = "./preprocessed_data/val"
+    test_dir: str = "./preprocessed_data/test"
     
     # Data splits (70/15/15)
     train_ratio: float = 0.70

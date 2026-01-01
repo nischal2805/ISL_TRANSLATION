@@ -337,10 +337,10 @@ def preprocess_multicore(
 # ============================================================================
 
 if __name__ == '__main__':
-    # Configuration
-    VIDEOS_DIR = r"E:\iSign-videos_v1.1"
-    ANNOTATIONS_FILE = r"E:\5thsem el\APPROACH 2\iSign_v1.1.csv"
-    OUTPUT_DIR = r"E:\5thsem el\APPROACH 2\preprocessed_data"
+    # Configuration - relative paths (update as needed)
+    VIDEOS_DIR = "./data/videos"
+    ANNOTATIONS_FILE = "./data/iSign_v1.1.csv"
+    OUTPUT_DIR = "./preprocessed_data"
     
     # GPU mode for subset ratio
     GPU_MODE = "small"  # "small" = 40%, "large" = 100%

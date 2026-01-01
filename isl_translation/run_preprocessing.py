@@ -14,10 +14,10 @@ from config import training_config, set_gpu_mode
 
 
 def main():
-    # Configuration - UPDATE THESE PATHS
-    VIDEOS_DIR = r"E:\iSign-videos_v1.1"
-    ANNOTATIONS_FILE = r"E:\5thsem el\APPROACH 2\iSign_v1.1.csv"
-    OUTPUT_DIR = r"E://5thsem el//APPROACH 2//preprocessed_data"
+    # Configuration - relative paths (update as needed)
+    VIDEOS_DIR = "./data/videos"
+    ANNOTATIONS_FILE = "./data/iSign_v1.1.csv"
+    OUTPUT_DIR = "./preprocessed_data"
     
     # GPU mode determines subset ratio
     GPU_MODE = "small"  # "small" = 40% data, "large" = 100% data
