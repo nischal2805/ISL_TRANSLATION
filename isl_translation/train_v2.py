@@ -383,19 +383,22 @@ class TrainerV2:
 def main():
     parser = argparse.ArgumentParser(description='Train ISL Translation V2')
     
-    # Data paths - Updated for V2 preprocessed data with velocity/acceleration
-    parser.add_argument('--data-dir', type=str, 
-                       default=r'E:\5thsem el\APPROACH 2\preprocessed_v2',
-                       help='Directory with preprocessed data (612-dim features)')
-    parser.add_argument('--metadata', type=str,
-                       default=r'E:\5thsem el\APPROACH 2\preprocessed_v2\metadata.csv',
-                       help='Path to metadata.csv')
+    # Data paths - Server paths for A100 GPU
+    parser.add_argument('--train-dir', type=str, 
+                       default='/media/rvcse22/CSERV/kortex_sem5/data/train/train',
+                       help='Training data directory')
+    parser.add_argument('--val-dir', type=str,
+                       default='/media/rvcse22/CSERV/kortex_sem5/data/val',
+                       help='Validation data directory')
+    parser.add_argument('--test-dir', type=str,
+                       default='/media/rvcse22/CSERV/kortex_sem5/data/test/test',
+                       help='Test data directory')
     parser.add_argument('--tokenizer-dir', type=str,
-                       default=r'E:\5thsem el\APPROACH 2\isl_translation\tokenizer_model',
+                       default='/media/rvcse22/CSERV/kortex_sem5/nischal/isl_translation/tokenizer_model',
                        help='Directory with trained tokenizer')
     parser.add_argument('--annotations', type=str,
-                       default=r'E:\5thsem el\kortex_5th_sem\data\iSign_v1.1.csv',
-                       help='Annotations CSV (for training tokenizer if needed)')
+                       default='/media/rvcse22/CSERV/kortex_sem5/data/iSign_v1.1.csv',
+                       help='Annotations CSV')
     
     # Model config
     parser.add_argument('--vocab-size', type=int, default=2000)

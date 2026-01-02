@@ -3,6 +3,7 @@ preprocessed_data/
 output_preprocessed/
 output_preprocessed_v2/
 preprocessed_v2/
+preprocessed_v2_fp16/
 
 # Model checkpoints
 checkpoints/
