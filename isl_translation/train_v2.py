@@ -99,10 +99,15 @@ class TrainerV2:
         self.max_grad_norm = config.get('max_grad_norm', 1.0)
     
     def _create_noam_scheduler(self, warmup_steps: int):
-        """Create Noam learning rate scheduler."""
+        """Create warmup + constant learning rate scheduler."""
         def lr_lambda(step):
             step = max(step, 1)
-            return min(step ** -0.5, step * warmup_steps ** -1.5)
+            if step < warmup_steps:
+                # Linear warmup
+                return step / warmup_steps
+            else:
+                # Constant LR after warmup
+                return 1.0
         
         return optim.lr_scheduler.LambdaLR(self.optimizer, lr_lambda)
     
