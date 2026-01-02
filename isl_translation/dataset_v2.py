@@ -193,11 +193,14 @@ class SimpleISLDataset(Dataset):
         self.max_src_len = max_src_len
         self.max_tgt_len = max_tgt_len
         
-        # Get all .npy files that have corresponding text
+        # Get all .npy files that have corresponding valid text
         self.files = []
         for f in self.data_dir.glob('*.npy'):
             if f.stem in uid_to_text:
-                self.files.append(f)
+                text = uid_to_text[f.stem]
+                # Skip if text is NaN or not a string
+                if isinstance(text, str) and len(text.strip()) > 0:
+                    self.files.append(f)
         
         print(f"Loaded {len(self.files)} samples from {data_dir}")
     
@@ -213,7 +216,7 @@ class SimpleISLDataset(Dataset):
             features = features[:self.max_src_len]
         
         # Get text and tokenize
-        text = self.uid_to_text[f.stem]
+        text = str(self.uid_to_text[f.stem])  # Ensure string
         token_ids = self.tokenizer.encode(text, add_bos=True, add_eos=True, max_length=self.max_tgt_len)
         
         return {
