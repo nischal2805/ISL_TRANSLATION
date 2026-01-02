@@ -337,13 +337,13 @@ def preprocess_multicore(
 # ============================================================================
 
 if __name__ == '__main__':
-    # Configuration
-    VIDEOS_DIR = r"E:\iSign-videos_v1.1"
-    ANNOTATIONS_FILE = r"E:\5thsem el\APPROACH 2\iSign_v1.1.csv"
-    OUTPUT_DIR = r"E:\5thsem el\APPROACH 2\preprocessed_data"
+    # Configuration - GPU SERVER PATHS
+    VIDEOS_DIR = "/media/rvcse22/CSERV/kortex_sem5/ramita/videos"
+    ANNOTATIONS_FILE = "/media/rvcse22/CSERV/kortex_sem5/ramita/iSign_v1.1.csv"
+    OUTPUT_DIR = "/media/rvcse22/CSERV/kortex_sem5/ramita/outpu_final"
     
     # GPU mode for subset ratio
-    GPU_MODE = "small"  # "small" = 40%, "large" = 100%
+    GPU_MODE = "large"  # "small" = 40%, "large" = 100%
     
     set_gpu_mode(GPU_MODE)
     SUBSET_RATIO = training_config.subset_ratio

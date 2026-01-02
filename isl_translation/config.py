@@ -13,18 +13,18 @@ from pathlib import Path
 @dataclass
 class DataConfig:
     """Data pipeline configuration."""
-    # Dataset paths - ACTUAL PATHS
-    dataset_root: str = r"E:\5thsem el\APPROACH 2"
-    videos_dir: str = r"E:\iSign-videos_v1.1"
-    annotations_file: str = r"E:\5thsem el\APPROACH 2\iSign_v1.1.csv"
-    csv_path: str = r"E:\5thsem el\APPROACH 2\iSign_v1.1.csv"  # Alias
+    # Dataset paths - GPU SERVER PATHS
+    dataset_root: str = "/media/rvcse22/CSERV/kortex_sem5/ramita"
+    videos_dir: str = "/media/rvcse22/CSERV/kortex_sem5/ramita/videos"
+    annotations_file: str = "/media/rvcse22/CSERV/kortex_sem5/ramita/iSign_v1.1.csv"
+    csv_path: str = "/media/rvcse22/CSERV/kortex_sem5/ramita/iSign_v1.1.csv"  # Alias
     
     # Preprocessed data paths
-    preprocessed_dir: str = r"E:\5thsem el\APPROACH 2\preprocessed_data"
-    processed_dir: str = r"E:\5thsem el\APPROACH 2\preprocessed_data"  # Alias
-    train_dir: str = r"E:\5thsem el\APPROACH 2\preprocessed_data\train"
-    val_dir: str = r"E:\5thsem el\APPROACH 2\preprocessed_data\val"
-    test_dir: str = r"E:\5thsem el\APPROACH 2\preprocessed_data\test"
+    preprocessed_dir: str = "/media/rvcse22/CSERV/kortex_sem5/ramita/outpu_final"
+    processed_dir: str = "/media/rvcse22/CSERV/kortex_sem5/ramita/outpu_final"  # Alias
+    train_dir: str = "/media/rvcse22/CSERV/kortex_sem5/ramita/outpu_final/train"
+    val_dir: str = "/media/rvcse22/CSERV/kortex_sem5/ramita/outpu_final/val"
+    test_dir: str = "/media/rvcse22/CSERV/kortex_sem5/ramita/outpu_final/test"
     
     # Data splits (70/15/15)
     train_ratio: float = 0.70

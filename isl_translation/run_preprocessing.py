@@ -14,13 +14,13 @@ from config import training_config, set_gpu_mode
 
 
 def main():
-    # Configuration - UPDATE THESE PATHS
-    VIDEOS_DIR = r"E:\iSign-videos_v1.1"
-    ANNOTATIONS_FILE = r"E:\5thsem el\APPROACH 2\iSign_v1.1.csv"
-    OUTPUT_DIR = r"E://5thsem el//APPROACH 2//preprocessed_data"
+    # Configuration - GPU SERVER PATHS
+    VIDEOS_DIR = "/media/rvcse22/CSERV/kortex_sem5/ramita/videos"
+    ANNOTATIONS_FILE = "/media/rvcse22/CSERV/kortex_sem5/ramita/iSign_v1.1.csv"
+    OUTPUT_DIR = "/media/rvcse22/CSERV/kortex_sem5/ramita/outpu_final"
     
     # GPU mode determines subset ratio
-    GPU_MODE = "small"  # "small" = 40% data, "large" = 100% data
+    GPU_MODE = "large"  # "small" = 40% data, "large" = 100% data
     
     # Set GPU mode to get correct subset ratio
     set_gpu_mode(GPU_MODE)

@@ -16,13 +16,13 @@ from train import Trainer
 
 
 def main():
-    # Configuration - UPDATE THESE PATHS
-    PREPROCESSED_DIR = r"E:\5thsem el\APPROACH 2\preprocessed_data"
-    METADATA_FILE = r"E:\5thsem el\APPROACH 2\preprocessed_data\metadata.csv"
-    OUTPUT_DIR = r"E:\5thsem el\APPROACH 2\checkpoints"
+    # Configuration - GPU SERVER PATHS
+    PREPROCESSED_DIR = "/media/rvcse22/CSERV/kortex_sem5/ramita/outpu_final"
+    METADATA_FILE = "/media/rvcse22/CSERV/kortex_sem5/ramita/outpu_final/metadata.csv"
+    OUTPUT_DIR = "/media/rvcse22/CSERV/kortex_sem5/ramita/checkpoints"
     
     # GPU mode: "small" for RTX 4060, "large" for A100
-    GPU_MODE = "small"
+    GPU_MODE = "large"
     
     print("=" * 60)
     print("ISL Translation - Training")
