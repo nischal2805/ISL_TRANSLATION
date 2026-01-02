@@ -180,3 +180,94 @@ def create_dataloaders_v2(
     )
     
     return train_loader, val_loader, test_loader
+
+
+class SimpleISLDataset(Dataset):
+    """Simple dataset that loads from separate train/val/test folders without metadata."""
+    
+    def __init__(self, data_dir: str, uid_to_text: dict, tokenizer, max_src_len=500, max_tgt_len=100):
+        self.data_dir = Path(data_dir)
+        self.uid_to_text = uid_to_text
+        self.tokenizer = tokenizer
+        self.max_src_len = max_src_len
+        self.max_tgt_len = max_tgt_len
+        
+        # Get all .npy files that have corresponding text
+        self.files = []
+        for f in self.data_dir.glob('*.npy'):
+            if f.stem in uid_to_text:
+                self.files.append(f)
+        
+        print(f"Loaded {len(self.files)} samples from {data_dir}")
+    
+    def __len__(self):
+        return len(self.files)
+    
+    def __getitem__(self, idx):
+        f = self.files[idx]
+        features = np.load(f)
+        
+        # Truncate if needed
+        if features.shape[0] > self.max_src_len:
+            features = features[:self.max_src_len]
+        
+        # Get text and tokenize
+        text = self.uid_to_text[f.stem]
+        token_ids = self.tokenizer.encode(text, add_bos=True, add_eos=True, max_length=self.max_tgt_len)
+        
+        return {
+            'features': torch.FloatTensor(features),
+            'feature_length': features.shape[0],
+            'targets': torch.LongTensor(token_ids),
+            'target_length': len(token_ids),
+            'text': text
+        }
+
+
+def create_simple_dataloaders(
+    train_dir: str,
+    val_dir: str,
+    test_dir: str,
+    uid_to_text: dict,
+    tokenizer,
+    batch_size: int = 32,
+    num_workers: int = 4,
+    max_src_len: int = 500,
+    max_tgt_len: int = 100
+) -> Tuple[DataLoader, DataLoader, DataLoader]:
+    """Create dataloaders from separate train/val/test directories."""
+    
+    train_dataset = SimpleISLDataset(train_dir, uid_to_text, tokenizer, max_src_len, max_tgt_len)
+    val_dataset = SimpleISLDataset(val_dir, uid_to_text, tokenizer, max_src_len, max_tgt_len)
+    test_dataset = SimpleISLDataset(test_dir, uid_to_text, tokenizer, max_src_len, max_tgt_len)
+    
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=num_workers,
+        collate_fn=collate_fn,
+        pin_memory=True,
+        drop_last=True
+    )
+    
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        collate_fn=collate_fn,
+        pin_memory=True
+    )
+    
+    test_loader = DataLoader(
+        test_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        collate_fn=collate_fn,
+        pin_memory=True
+    )
+    
+    return train_loader, val_loader, test_loader
+

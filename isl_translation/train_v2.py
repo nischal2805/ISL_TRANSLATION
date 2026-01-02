@@ -475,9 +475,18 @@ def main():
     
     # Create dataloaders
     print("\nCreating dataloaders...")
-    train_loader, val_loader, test_loader = create_dataloaders_v2(
-        data_dir=args.data_dir,
-        metadata_path=args.metadata,
+    from dataset_v2 import create_simple_dataloaders
+    import pandas as pd
+    
+    # Load annotations for text labels
+    df = pd.read_csv(args.annotations)
+    uid_to_text = dict(zip(df['uid'].astype(str), df['text']))
+    
+    train_loader, val_loader, test_loader = create_simple_dataloaders(
+        train_dir=args.train_dir,
+        val_dir=args.val_dir,
+        test_dir=args.test_dir,
+        uid_to_text=uid_to_text,
         tokenizer=tokenizer,
         batch_size=args.batch_size,
         num_workers=args.num_workers
