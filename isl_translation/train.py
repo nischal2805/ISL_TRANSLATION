@@ -281,18 +281,19 @@ class ScheduledValue:
 
 
 class EarlyStopping:
-    """Early stopping with patience."""
+    """Early stopping based on validation WER (lower is better)."""
     
     def __init__(self, patience: int = 10, min_delta: float = 0.0):
         self.patience = patience
         self.min_delta = min_delta
         self.counter = 0
-        self.best_loss = float('inf')
+        self.best_value = float('inf')  # For WER, lower is better
         self.early_stop = False
     
-    def __call__(self, val_loss: float) -> bool:
-        if val_loss < self.best_loss - self.min_delta:
-            self.best_loss = val_loss
+    def __call__(self, val_metric: float) -> bool:
+        """Check if training should stop. val_metric should be WER (lower is better)."""
+        if val_metric < self.best_value - self.min_delta:
+            self.best_value = val_metric
             self.counter = 0
         else:
             self.counter += 1
@@ -395,7 +396,7 @@ class NaNSafeTrainer:
             vocab_size=vocab.size,
             pad_id=vocab.pad_id,
             blank_id=vocab.pad_id,  # Use PAD as CTC blank
-            label_smoothing=0.1
+            label_smoothing=training_config.label_smoothing  # Use config value
         )
         
         # Optimizer
@@ -431,16 +432,16 @@ class NaNSafeTrainer:
         # Mixed precision
         self.scaler = GradScaler(enabled=training_config.use_amp)
         
-        # Scheduled values
+        # Scheduled values - Use config values
         self.ctc_weight_scheduler = ScheduledValue(
-            start=0.5,  # Start with equal weight
-            end=0.2,    # End with more emphasis on decoder
+            start=training_config.ctc_weight_start,  # Start high (0.3) for alignment
+            end=training_config.ctc_weight_end,      # Decay to 0.1
             num_steps=total_steps
         )
         
         self.tf_ratio_scheduler = ScheduledValue(
-            start=1.0,  # Full teacher forcing at start
-            end=0.7,    # Reduce to 70% by end
+            start=training_config.tf_ratio_start,  # Full teacher forcing (1.0)
+            end=training_config.tf_ratio_end,      # End at 0.5
             num_steps=total_steps
         )
         
@@ -451,9 +452,14 @@ class NaNSafeTrainer:
         
         # Training state
         self.global_step = 0
-        self.best_val_loss = float('inf')
+        self.best_wer = float('inf')  # Track best WER, not loss
         self.nan_batches = 0
         self.total_batches = 0
+        
+        # Create checkpoints directory at server path from config
+        self.checkpoint_dir = training_config.checkpoint_dir
+        os.makedirs(self.checkpoint_dir, exist_ok=True)
+        self.logger.info(f"Checkpoints will be saved to: {self.checkpoint_dir}")
     
     def train_epoch(self, epoch: int) -> Dict[str, float]:
         """Train for one epoch with NaN safety."""
@@ -553,10 +559,11 @@ class NaNSafeTrainer:
                 max_norm=training_config.max_grad_norm
             )
             
-            # Check gradient health
+            # Check gradient health - must call scaler.update() to reset state
             if not torch.isfinite(grad_norm):
                 self.logger.warning(f"Batch {batch_idx}: Non-finite gradient norm, skipping update")
                 self.optimizer.zero_grad()
+                self.scaler.update()  # Reset scaler state to prevent "already unscaled" error
                 skipped_batches += 1
                 continue
             
@@ -613,7 +620,11 @@ class NaNSafeTrainer:
     
     @torch.no_grad()
     def validate(self, epoch: int) -> Dict[str, float]:
-        """Validate the model."""
+        """Validate the model.
+        
+        IMPORTANT: WER is computed ONLY from attention decoder outputs, NOT from CTC.
+        CTC produces blank-heavy sequences that would inflate WER.
+        """
         self.model.eval()
         
         val_losses = {
@@ -648,14 +659,15 @@ class NaNSafeTrainer:
             decoder_logits = outputs['decoder_logits']
             encoder_lengths = outputs['encoder_lengths']
             
-            # Compute loss
+            # Compute loss with current CTC weight (use config value, not hardcoded 0.3)
+            ctc_weight = self.ctc_weight_scheduler.get() if hasattr(self, 'ctc_weight_scheduler') else training_config.ctc_weight_start
             loss, loss_dict = self.loss_fn(
                 ctc_logits=ctc_logits,
                 decoder_logits=decoder_logits,
                 targets=targets,
                 encoder_lengths=encoder_lengths,
                 target_lengths=target_lengths,
-                ctc_weight=0.3
+                ctc_weight=ctc_weight
             )
             
             if torch.isfinite(loss):
@@ -664,12 +676,16 @@ class NaNSafeTrainer:
                 val_losses['ce_loss'] += loss_dict['ce_loss']
                 num_batches += 1
             
-            # Use proper greedy decoding for WER computation (Bug #4 fix)
-            # This gives a true measure of model's autoregressive generation ability
+            # ================================================================
+            # WER COMPUTATION: Use ONLY attention decoder outputs (use_ctc=False)
+            # NEVER use CTC predictions for WER - CTC is for alignment only
+            # and produces short, blank-heavy sequences that inflate WER
+            # ================================================================
             predicted_ids, _ = self.model.decode(
                 features, 
                 feature_lengths, 
-                max_len=targets.size(1)
+                max_len=targets.size(1),
+                use_ctc=False  # CRITICAL: Use attention decoder, not CTC
             )
             
             for i in range(predicted_ids.size(0)):
@@ -688,16 +704,39 @@ class NaNSafeTrainer:
             for key in val_losses:
                 val_losses[key] /= num_batches
         
-        # Compute WER - compute_wer expects lists of strings
+        # Compute WER from attention decoder predictions (NOT CTC)
         if len(all_predictions) > 0:
             val_losses['wer'] = compute_wer(all_predictions, all_references)
+            
+            # ================================================================
+            # PRINT TARGET-PREDICTION PAIRS (helps debug WER issues)
+            # ================================================================
+            num_samples = min(training_config.num_val_samples_to_print, len(all_predictions))
+            self.logger.info(f"\n{'='*60}")
+            self.logger.info(f"Sample Predictions (Epoch {epoch}) - {num_samples} samples:")
+            self.logger.info(f"{'='*60}")
+            
+            # Pick samples with variety (some early, some late in batch)
+            sample_indices = list(range(0, len(all_predictions), max(1, len(all_predictions) // num_samples)))[:num_samples]
+            
+            for idx in sample_indices:
+                target = all_references[idx]
+                pred = all_predictions[idx]
+                match_symbol = "✓" if target.strip().lower() == pred.strip().lower() else "✗"
+                self.logger.info(f"  [{idx}] Target:     '{target}'")
+                self.logger.info(f"       Prediction: '{pred}' {match_symbol}")
+            self.logger.info(f"{'='*60}\n")
         else:
             val_losses['wer'] = 1.0
         
         return val_losses
     
     def train(self, num_epochs: int, resume_from: Optional[str] = None):
-        """Main training loop."""
+        """Main training loop.
+        
+        IMPORTANT: Early stopping and best model saving are based on WER, not loss.
+        Loss is a poor proxy for sequence quality - use WER for model selection.
+        """
         start_epoch = 0
         
         # Resume from checkpoint
@@ -710,6 +749,10 @@ class NaNSafeTrainer:
         self.logger.info(f"Starting training for {num_epochs} epochs")
         self.logger.info(f"Device: {self.device}")
         self.logger.info(f"Model parameters: {sum(p.numel() for p in self.model.parameters()):,}")
+        self.logger.info(f"CTC weight: {training_config.ctc_weight_start} -> {training_config.ctc_weight_end}")
+        self.logger.info(f"Label smoothing: {training_config.label_smoothing}")
+        self.logger.info(f"Learning rate: {training_config.learning_rate}")
+        self.logger.info(f"Early stopping based on: WER (lower is better)")
         
         for epoch in range(start_epoch, num_epochs):
             epoch_start = time.time()
@@ -728,6 +771,7 @@ class NaNSafeTrainer:
                 f"Train Loss: {train_losses['total_loss']:.4f} | "
                 f"Val Loss: {val_losses['total_loss']:.4f} | "
                 f"Val WER: {val_losses['wer']:.4f} | "
+                f"Best WER: {self.best_wer:.4f} | "
                 f"Skipped: {train_losses['skipped_batches']} | "
                 f"Time: {epoch_time:.1f}s"
             )
@@ -735,38 +779,63 @@ class NaNSafeTrainer:
             # TensorBoard
             self.writer.add_scalar('val/total_loss', val_losses['total_loss'], epoch + 1)
             self.writer.add_scalar('val/wer', val_losses['wer'], epoch + 1)
+            self.writer.add_scalar('val/best_wer', self.best_wer, epoch + 1)
             self.writer.add_scalar('train/nan_rate', train_losses['nan_rate'], epoch + 1)
             
-            # Save best model
-            if val_losses['total_loss'] < self.best_val_loss:
-                self.best_val_loss = val_losses['total_loss']
+            # Always save latest model (so we have at least one checkpoint)
+            latest_path = os.path.join(self.checkpoint_dir, 'latest_model.pt')
+            save_checkpoint(
+                self.model, self.optimizer, self.scheduler,
+                epoch + 1, val_losses['total_loss'],
+                latest_path,
+                extra_info={'wer': val_losses['wer']}
+            )
+            
+            # ================================================================
+            # SAVE BEST MODEL BASED ON WER (not loss!)
+            # Loss is a poor proxy for sequence quality - WER directly measures
+            # what we care about: the quality of generated sequences
+            # ================================================================
+            if val_losses['wer'] < self.best_wer:
+                self.best_wer = val_losses['wer']
+                # Save to checkpoints/best.pt as requested
+                best_path = os.path.join(self.checkpoint_dir, 'best.pt')
                 save_checkpoint(
                     self.model, self.optimizer, self.scheduler,
                     epoch + 1, val_losses['total_loss'],
-                    os.path.join(self.log_dir, 'best_model.pt'),
+                    best_path,
+                    extra_info={'wer': val_losses['wer'], 'best_wer': True}
+                )
+                self.logger.info(f"🎯 NEW BEST MODEL saved to {best_path} with WER={val_losses['wer']:.4f}")
+            
+            # Save regular checkpoint at intervals
+            if (epoch + 1) % training_config.save_interval == 0:
+                checkpoint_path = os.path.join(self.checkpoint_dir, f'checkpoint_epoch_{epoch + 1}.pt')
+                save_checkpoint(
+                    self.model, self.optimizer, self.scheduler,
+                    epoch + 1, val_losses['total_loss'],
+                    checkpoint_path,
                     extra_info={'wer': val_losses['wer']}
                 )
-                self.logger.info(f"Saved best model with val_loss={val_losses['total_loss']:.4f}")
+                self.logger.info(f"Saved checkpoint to {checkpoint_path}")
             
-            # Save regular checkpoint
-            if (epoch + 1) % training_config.save_interval == 0:
-                save_checkpoint(
-                    self.model, self.optimizer, self.scheduler,
-                    epoch + 1, val_losses['total_loss'],
-                    os.path.join(self.log_dir, f'checkpoint_epoch_{epoch + 1}.pt')
-                )
-            
-            # Early stopping
-            if self.early_stopping(val_losses['total_loss']):
-                self.logger.info(f"Early stopping triggered at epoch {epoch + 1}")
+            # ================================================================
+            # EARLY STOPPING BASED ON WER (not loss!)
+            # ================================================================
+            if self.early_stopping(val_losses['wer']):
+                self.logger.info(f"Early stopping triggered at epoch {epoch + 1} (WER not improving)")
                 break
         
-        # Final save
+        # Save LAST model after training completion
+        last_path = os.path.join(self.checkpoint_dir, 'last_model.pt')
         save_checkpoint(
             self.model, self.optimizer, self.scheduler,
-            num_epochs, val_losses['total_loss'],
-            os.path.join(self.log_dir, 'final_model.pt')
+            epoch + 1, val_losses['total_loss'],
+            last_path,
+            extra_info={'wer': val_losses['wer'], 'best_wer': self.best_wer}
         )
+        self.logger.info(f"Saved last model to {last_path}")
+        self.logger.info(f"Best WER achieved: {self.best_wer:.4f} (saved to {self.checkpoint_dir}/best.pt)")
         
         self.writer.close()
         self.logger.info("Training completed!")

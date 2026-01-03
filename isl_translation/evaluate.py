@@ -104,9 +104,13 @@ def compute_cer(predictions: List[str], targets: List[str]) -> float:
 
 def compute_wer(predictions: List[str], targets: List[str]) -> float:
     """
-    Compute Word Error Rate (WER).
+    Compute Word Error Rate (WER) using TRUE word-level edit distance.
     
     WER = (S + D + I) / N (at word level)
+    where S = word substitutions, D = word deletions, I = word insertions
+    N = total words in target
+    
+    IMPORTANT: This computes edit distance on word tokens, NOT characters.
     
     Args:
         predictions: List of predicted strings
@@ -122,13 +126,7 @@ def compute_wer(predictions: List[str], targets: List[str]) -> float:
         pred_words = pred.lower().strip().split()
         target_words = target.lower().strip().split()
         
-        # Convert to word-level edit distance
-        distance = compute_edit_distance(
-            ' '.join(pred_words),
-            ' '.join(target_words)
-        )
-        
-        # Actually compute word-level distance properly
+        # Use TRUE word-level edit distance (not character-level!)
         distance = word_edit_distance(pred_words, target_words)
         
         total_distance += distance
