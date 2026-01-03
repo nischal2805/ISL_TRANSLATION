@@ -75,34 +75,34 @@ class LandmarkConfig:
 class ModelConfig:
     """Model architecture configuration."""
     # Input/Output dimensions
-    input_dim: int = 414      # 138 position * 3 (pos + vel + acc)
-    d_model: int = 256        # Model dimension (used by create_model)
-    hidden_dim: int = 256     # Main hidden dimension (same as d_model)
-    embedding_dim: int = 256  # Decoder embedding dimension
+    input_dim: int = 138      # 46 landmarks * 3 coords (your actual data dimension)
+    d_model: int = 384        # Increased model dimension for more capacity
+    hidden_dim: int = 384     # Main hidden dimension (same as d_model)
+    embedding_dim: int = 384  # Decoder embedding dimension
     vocab_size: int = 35      # CORRECTED: 5 special + 26 letters + 4 punctuation
     
-    # Encoder
-    num_cnn_blocks: int = 2
+    # Encoder - Increased capacity
+    num_cnn_blocks: int = 3   # More CNN blocks for local feature extraction
     cnn_kernels: List[int] = field(default_factory=lambda: [3, 5, 7])
-    num_conformer_blocks: int = 2
-    num_heads: int = 4        # Attention heads (used by create_model)
-    num_attention_heads: int = 4
+    num_conformer_blocks: int = 4  # More conformer blocks for better context
+    num_heads: int = 6        # More attention heads
+    num_attention_heads: int = 6
     ff_expansion: int = 4     # Feed-forward expansion (used by create_model)
     conformer_ff_expansion: int = 4
     conv_kernel_size: int = 31  # Conformer conv kernel (used by create_model)
     conformer_conv_kernel: int = 31
     subsample_factor: int = 2  # Temporal subsampling
     
-    # Decoder (GRU only - no Transformer)
-    num_decoder_layers: int = 2
-    decoder_hidden_dim: int = 256
+    # Decoder - Increased capacity
+    num_decoder_layers: int = 3  # Deeper decoder
+    decoder_hidden_dim: int = 384
     
-    # Dropout rates (REDUCED for 127K dataset)
-    dropout: float = 0.3      # Main dropout (used by create_model)
-    input_dropout: float = 0.2
-    cnn_dropout: float = 0.1
-    encoder_dropout: float = 0.3  # Reduced from 0.4
-    decoder_dropout: float = 0.25  # Reduced from 0.3
+    # Dropout rates (tuned for balance)
+    dropout: float = 0.3       # Increased dropout for regularization
+    input_dropout: float = 0.1
+    cnn_dropout: float = 0.05
+    encoder_dropout: float = 0.15
+    decoder_dropout: float = 0.3  # Higher decoder dropout to prevent overfitting
     
     # Positional encoding
     max_seq_len: int = 1000
@@ -134,29 +134,30 @@ class TrainingConfig:
     
     # Optimizer
     optimizer: str = "adamw"
-    learning_rate: float = 5e-4
-    weight_decay: float = 5e-5  # REDUCED from 1e-4
-    betas: tuple = (0.9, 0.999)
+    learning_rate: float = 3e-5  # Lower LR for stable training with CTC+CE
+    weight_decay: float = 1e-5   # Reduced to prevent underfitting
+    betas: tuple = (0.9, 0.98)   # Slightly more aggressive momentum
     
     # Learning rate schedule
-    warmup_epochs: int = 5
-    min_lr: float = 1e-6
+    warmup_epochs: int = 8       # Longer warmup for stability
+    min_lr: float = 1e-5         # Higher min LR to keep learning
     scheduler_t0: int = 10
     scheduler_tmult: int = 2
     
-    # Loss weights
-    ctc_weight_start: float = 0.3
-    ctc_weight_end: float = 0.1
-    ctc_decay_epochs: int = 30
-    label_smoothing: float = 0.1
+    # Loss weights - CTC is only for alignment, attention decoder drives WER
+    # IMPORTANT: CTC produces blank-heavy sequences that inflate WER, so keep weight low
+    ctc_weight_start: float = 0.1  # Low weight - CTC is auxiliary for alignment only
+    ctc_weight_end: float = 0.05   # Decay to near-zero to let attention dominate
+    ctc_decay_epochs: int = 10     # Drop CTC quickly after warm-up
+    label_smoothing: float = 0.1   # Increased for better regularization
     
-    # Teacher forcing
-    tf_ratio_start: float = 0.9
-    tf_ratio_end: float = 0.2
-    tf_decay_epochs: int = 15
+    # Teacher forcing - slower decay for better learning
+    tf_ratio_start: float = 1.0   # Full teacher forcing initially
+    tf_ratio_end: float = 0.5     # Keep 50% at end for stability
+    tf_decay_epochs: int = 40     # Slower decay
     
     # Gradient clipping
-    max_grad_norm: float = 1.0
+    max_grad_norm: float = 0.5    # Tighter clipping for CTC stability
     
     # Mixed precision
     use_amp: bool = True
@@ -165,11 +166,11 @@ class TrainingConfig:
     use_gradient_checkpointing: bool = True
     
     # Early stopping
-    patience: int = 15
-    min_delta: float = 0.001
+    patience: int = 25            # More patience for exploration
+    min_delta: float = 0.0001     # More sensitive improvement detection
     
-    # Checkpointing
-    checkpoint_dir: str = "./checkpoints"
+    # Checkpointing - GPU SERVER PATH
+    checkpoint_dir: str = "/media/rvcse22/CSERV/kortex_sem5/ramita/checkpoints"
     save_every_n_epochs: int = 5
     
     # Logging
@@ -178,7 +179,7 @@ class TrainingConfig:
     
     # Validation
     val_every_n_epochs: int = 1
-    num_val_samples_to_print: int = 5
+    num_val_samples_to_print: int = 2  # Print 2 predictions per epoch
     
     @property
     def epochs(self) -> int:

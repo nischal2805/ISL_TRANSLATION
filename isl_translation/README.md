@@ -7,9 +7,9 @@ Indian Sign Language (ISL) to Text Translation using Deep Learning.
 This project implements an end-to-end ISL translation system that converts sign language videos to text. The system uses:
 
 - **MediaPipe** for landmark extraction (46 keypoints: pose + hands, NO face)
-- **Multi-scale CNN + Conformer** encoder
-- **Dual decoder**: CTC head + GRU decoder with cross-attention
-- **~18M parameters**, optimized for mobile deployment
+- **Multi-scale CNN + Conformer** encoder (4 blocks)
+- **Dual decoder**: CTC head + GRU decoder with **location-aware attention**
+- **~20M parameters**, optimized for mobile deployment
 
 ## 📁 Project Structure
 
@@ -19,7 +19,7 @@ isl_translation/
 ├── vocab.py            # Vocabulary (35 tokens)
 ├── preprocessing.py    # MediaPipe extraction & feature engineering
 ├── dataset.py          # PyTorch Dataset & DataLoader
-├── model.py            # Model architecture (~18M params)
+├── model.py            # Model architecture (~20M params)
 ├── train.py            # Training with hybrid CTC+CE loss
 ├── evaluate.py         # Evaluation metrics (CER, WER, BLEU)
 ├── test.py             # Testing & inference
@@ -116,40 +116,47 @@ set_gpu_mode('large')
 
 ### Encoder
 ```
-Input (B, T, 414)
+Input (B, T, 138)
     ↓
 Input Projection (Linear → LayerNorm → Dropout)
     ↓
-Multi-scale CNN × 2 (kernels: 3, 5, 7)
+Multi-scale CNN × 3 (kernels: 3, 5, 7)
     ↓
 Temporal Subsampling (2x reduction)
     ↓
 Positional Encoding
     ↓
-Conformer × 2 (FFN → MHSA → Conv → FFN)
+Conformer × 4 (FFN → MHSA → Conv → FFN)
     ↓
-Output (B, T/2, 256)
+Output (B, T/2, 384)
 ```
 
-### Decoder
+### Decoder (with Location-Aware Attention)
 ```
-Encoder Output (B, T/2, 256)
+Encoder Output (B, T/2, 384)
     ↓
-┌─────────────────────────────────────┐
-│ CTC Head          GRU Decoder       │
-│ (Linear→LogSoftmax)  (Embed→GRU×2→CrossAttn→Linear)
-│     ↓                    ↓          │
-│ CTC Loss (λ=0.3→0.1)  CE Loss       │
-└─────────────────────────────────────┘
+┌─────────────────────────────────────────────────┐
+│ CTC Head              GRU Decoder               │
+│ (Linear→LogSoftmax)   ┌─────────────────────┐   │
+│                       │ Embedding (scaled)  │   │
+│                       │        ↓            │   │
+│                       │ Pre-net (2-layer)   │   │
+│                       │        ↓            │   │
+│                       │ GRU × 3 (residual)  │   │
+│                       │        ↓            │   │
+│                       │ Location-Aware Attn │   │
+│                       │        ↓            │   │
+│                       │ Output Projection   │   │
+│                       └─────────────────────┘   │
+│     ↓                          ↓                │
+│ CTC Loss (λ=0.1→0.2)       CE Loss              │
+└─────────────────────────────────────────────────┘
     ↓
 Hybrid Loss = λ × CTC + (1-λ) × CE
 ```
 
-### Features (414 dimensions)
+### Features (138 dimensions)
 - **Landmarks**: 46 keypoints × 3 coords = 138
-- **Velocity**: 138 dimensions
-- **Acceleration**: 138 dimensions
-- **Total**: 414 dimensions
 
 ### Landmarks (46 keypoints)
 - **Pose**: 4 points (shoulders 11,12 + elbows 13,14)
@@ -159,21 +166,32 @@ Hybrid Loss = λ × CTC + (1-λ) × CE
 
 ## 📊 Training Details
 
+### Model Architecture
+| Parameter | Value |
+|-----------|-------|
+| d_model | 384 |
+| Conformer Blocks | 4 |
+| CNN Blocks | 3 |
+| Attention Heads | 6 |
+| Decoder Layers | 3 |
+| Total Parameters | ~20M |
+
 ### Hyperparameters
 | Parameter | Value |
 |-----------|-------|
-| d_model | 256 |
-| Dropout | 0.3 |
-| Weight Decay | 5e-5 |
-| Learning Rate | 5e-4 |
-| Label Smoothing | 0.1 |
-| Gradient Clipping | 1.0 |
+| Dropout | 0.15 |
+| Weight Decay | 1e-5 |
+| Learning Rate | 1e-3 |
+| Label Smoothing | 0.05 |
+| Gradient Clipping | 0.5 |
+| Warmup Epochs | 8 |
+| Early Stopping Patience | 25 |
 
 ### Scheduled Values
 | Value | Start → End |
 |-------|-------------|
-| CTC Weight (λ) | 0.3 → 0.1 |
-| Teacher Forcing | 0.9 → 0.2 |
+| CTC Weight (λ) | 0.1 → 0.2 |
+| Teacher Forcing | 1.0 → 0.5 |
 
 ### Loss Function
 ```
@@ -182,8 +200,14 @@ L = λ × L_ctc + (1-λ) × L_ce
 where:
 - L_ctc = CTC loss on encoder outputs
 - L_ce = CrossEntropy with label smoothing on decoder outputs
-- λ decreases from 0.3 to 0.1 during training
+- λ increases from 0.1 to 0.2 during training (CE-focused)
 ```
+
+### Key Architecture Features
+- **Location-Aware Attention**: Tracks previous attention weights using convolution to encourage monotonic alignment
+- **Pre-net**: 2-layer MLP with 50% dropout before GRU (improves attention alignment)
+- **Residual GRU Layers**: Better gradient flow in deeper decoder
+- **Scaled Embeddings**: Token embeddings scaled by √d_model
 
 ## 📈 Expected Results
 
@@ -192,7 +216,7 @@ where:
 | Character Accuracy | >85% |
 | Character Error Rate | <15% |
 | Word Error Rate | <25% |
-| Model Size (INT8) | ~18 MB |
+| Model Size (INT8) | ~20 MB |
 | Inference Speed | <100ms/video |
 
 ## 🔧 Troubleshooting

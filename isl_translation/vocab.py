@@ -4,6 +4,7 @@ ISL Translation System - Vocabulary
 Character-level vocabulary for ISL to English translation.
 """
 
+import math
 from typing import Dict, List, Optional
 from config import vocab_config
 
@@ -72,8 +73,10 @@ class Vocabulary:
         Returns:
             List of token IDs
         """
-        # Lowercase and handle characters
-        text = text.lower()
+        # Handle NaN/None/float values
+        if text is None or (isinstance(text, float) and math.isnan(text)):
+            text = ""
+        text = str(text).lower()
         
         ids = []
         
