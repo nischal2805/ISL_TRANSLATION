@@ -79,7 +79,7 @@ class ModelConfig:
     d_model: int = 256        # Model dimension (used by create_model)
     hidden_dim: int = 256     # Main hidden dimension (same as d_model)
     embedding_dim: int = 256  # Decoder embedding dimension
-    vocab_size: int = 35      # CORRECTED: 5 special + 26 letters + 4 punctuation
+    vocab_size: int = 0       # Set dynamically from vocab.vocab_size
     
     # Encoder
     num_cnn_blocks: int = 2
@@ -237,34 +237,25 @@ class TrainingConfig:
 
 @dataclass
 class VocabConfig:
-    """Vocabulary configuration."""
+    """Vocabulary configuration - Word-level vocabulary."""
     # Special tokens
     pad_token: str = "<pad>"
     sos_token: str = "<sos>"
     eos_token: str = "<eos>"
     unk_token: str = "<unk>"
-    space_token: str = " "
     
     # Token IDs
     pad_id: int = 0   # Also CTC blank
     sos_id: int = 1
     eos_id: int = 2
     unk_id: int = 3
-    space_id: int = 4
     
-    # Characters (a-z: 5-30)
-    char_offset: int = 5
+    # Words start from index 4
+    word_offset: int = 4
     
-    # Punctuation (31-34)
-    punct_map: dict = field(default_factory=lambda: {
-        '.': 31,
-        ',': 32,
-        '!': 33,
-        '?': 34
-    })
-    
-    # Total vocab size
-    vocab_size: int = 35
+    # Vocab size is set dynamically by Vocabulary class after loading CSV
+    # This is just a placeholder - actual size depends on dataset
+    vocab_size: int = 0  # Will be updated dynamically
 
 
 @dataclass 
