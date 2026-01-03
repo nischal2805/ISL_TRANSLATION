@@ -413,8 +413,8 @@ def main():
     
     # Model config
     parser.add_argument('--vocab-size', type=int, default=2000)
-    parser.add_argument('--d-model', type=int, default=256)
-    parser.add_argument('--encoder-layers', type=int, default=4)
+    parser.add_argument('--d-model', type=int, default=384)
+    parser.add_argument('--encoder-layers', type=int, default=6)
     parser.add_argument('--decoder-layers', type=int, default=4)
     parser.add_argument('--dropout', type=float, default=0.1)
     parser.add_argument('--ctc-weight', type=float, default=0.3)
