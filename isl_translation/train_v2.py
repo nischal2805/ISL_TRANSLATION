@@ -16,6 +16,7 @@ from typing import Dict, Optional, Tuple
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
 from torch.cuda.amp import GradScaler, autocast
 from torch.utils.tensorboard import SummaryWriter
@@ -26,7 +27,6 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from model_v2 import ModelConfig, create_model_v2, HybridCTCAttentionLoss
 from dataset_v2 import create_dataloaders_v2
 from tokenizer import BPETokenizer
-
 
 class TrainerV2:
     """
@@ -240,29 +240,92 @@ class TrainerV2:
     
     @torch.no_grad()
     def sample_predictions(self, num_samples: int = 3):
-        """Generate sample predictions for monitoring."""
+        """Generate sample predictions with detailed diagnostics for debugging."""
         self.model.eval()
         
-        batch = next(iter(self.val_loader))
+        try:
+            batch = next(iter(self.val_loader))
+        except StopIteration:
+            print("[SAMPLE ERROR] Validation loader is empty!")
+            return
+        
         features = batch['features'][:num_samples].to(self.device)
         feature_lengths = batch['feature_lengths'][:num_samples].to(self.device)
         texts = batch['texts'][:num_samples]
         
-        # Decode with attention
-        predictions, _ = self.model.decode_attention(features, feature_lengths, beam_size=1)
+        # ===== DIAGNOSTIC: Input Feature Statistics =====
+        print("\n" + "=" * 70)
+        print("DIAGNOSTIC: Input Feature Analysis")
+        print("=" * 70)
+        for i in range(min(num_samples, len(texts))):
+            feat = features[i, :feature_lengths[i].item()]
+            print(f"  Sample {i}: shape={feat.shape}, mean={feat.mean():.4f}, std={feat.std():.4f}, "
+                  f"min={feat.min():.4f}, max={feat.max():.4f}")
+            if feat.std() < 1e-6:
+                print(f"    ⚠️ WARNING: Very low variance - input may be collapsed!")
+            if feat.isnan().any():
+                print(f"    ❌ ERROR: NaN values detected in input!")
         
-        print("\n" + "=" * 50)
+        # ===== DIAGNOSTIC: Encoder Output Statistics =====
+        print("\nDIAGNOSTIC: Encoder Output Analysis")
+        print("-" * 50)
+        encoder_out, enc_lengths, enc_mask = self.model.encoder(features, feature_lengths)
+        for i in range(min(num_samples, len(texts))):
+            enc = encoder_out[i, :enc_lengths[i].item()]
+            print(f"  Sample {i}: mean={enc.mean():.4f}, std={enc.std():.4f}")
+        
+        # Check encoder output similarity (mode collapse detection)
+        if num_samples >= 2:
+            enc0 = encoder_out[0].mean(dim=0)
+            enc1 = encoder_out[1].mean(dim=0)
+            cosine_sim = F.cosine_similarity(enc0.unsqueeze(0), enc1.unsqueeze(0)).item()
+            if cosine_sim > 0.95:
+                print(f"  ⚠️ WARNING: Encoder outputs very similar (cosine={cosine_sim:.4f}) - MODE COLLAPSE LIKELY!")
+            else:
+                print(f"  ✓ Encoder outputs are diverse (cosine={cosine_sim:.4f})")
+        
+        # ===== DECODE WITH DIVERSITY CONTROLS =====
+        print("\nDIAGNOSTIC: Decoding with repetition_penalty=1.2")
+        print("-" * 50)
+        predictions, scores = self.model.decode_attention(
+            features, feature_lengths, 
+            beam_size=1,
+            repetition_penalty=1.2,
+            temperature=1.0
+        )
+        
+        print("\n" + "=" * 70)
         print("Sample Predictions:")
-        print("=" * 50)
+        print("=" * 70)
         
+        pred_texts = []
         for i in range(min(num_samples, len(texts))):
             pred_ids = predictions[i].cpu().tolist()
+            # Remove padding and EOS
+            pred_ids = [t for t in pred_ids if t != 0 and t != 3]
             pred_text = self.tokenizer.decode(pred_ids)
+            pred_texts.append(pred_text)
             
-            print(f"\nTarget:     {texts[i]}")
-            print(f"Prediction: {pred_text}")
+            print(f"\n  Target:     '{texts[i]}'")
+            print(f"  Prediction: '{pred_text}'")
+            print(f"  Token IDs:  {pred_ids[:10]}{'...' if len(pred_ids) > 10 else ''}")
         
-        print("=" * 50 + "\n")
+        # ===== MODE COLLAPSE DETECTION =====
+        unique_predictions = len(set(pred_texts))
+        if unique_predictions == 1 and num_samples > 1:
+            print("\n" + "!" * 70)
+            print("❌❌❌ MODE COLLAPSE DETECTED: All predictions are identical!")
+            print("Possible causes:")
+            print("  1. Encoder output collapsed (check variance above)")
+            print("  2. Gate values too low (decoder ignoring encoder)")
+            print("  3. Training data issue")
+            print("Recommended fixes:")
+            print("  - Increase gate_reg_weight in loss function")
+            print("  - Check input feature preprocessing")
+            print("  - Reduce learning rate")
+            print("!" * 70)
+        
+        print("=" * 70 + "\n")
     
     def save_checkpoint(self, is_best: bool = False):
         """Save checkpoint."""

@@ -235,6 +235,9 @@ class ConformerEncoder(nn.Module):
     def __init__(self, config: ModelConfig):
         super().__init__()
         
+        # Input normalization - CRITICAL to prevent same output issue
+        self.input_norm = nn.LayerNorm(config.input_dim)
+        
         # Input projection
         self.input_proj = nn.Sequential(
             nn.Linear(config.input_dim, config.d_model),
@@ -274,10 +277,30 @@ class ConformerEncoder(nn.Module):
             x: (B, T', d_model)
             lengths: (B,)
         """
+        # ===== INPUT VALIDATION =====
+        if x.isnan().any():
+            print("[ENCODER ERROR] NaN detected in input features!")
+            x = torch.nan_to_num(x, nan=0.0)
+        if x.isinf().any():
+            print("[ENCODER ERROR] Inf detected in input features!")
+            x = torch.clamp(x, min=-1e6, max=1e6)
+        
+        # Check for zero-variance input (potential collapse)
+        input_var = x.var(dim=-1).mean()
+        if input_var < 1e-8:
+            print(f"[ENCODER WARNING] Very low input variance: {input_var:.2e} - may cause same output!")
+        
+        # ===== INPUT NORMALIZATION - CRITICAL =====
+        x = self.input_norm(x)
+        
         x = self.input_proj(x)
         
-        for cnn in self.cnn_blocks:
+        for i, cnn in enumerate(self.cnn_blocks):
             x = cnn(x)
+            # NaN safety after CNN
+            if x.isnan().any():
+                print(f"[ENCODER ERROR] NaN after CNN block {i}!")
+                x = torch.nan_to_num(x, nan=0.0)
         
         x, lengths = self.subsample(x, lengths)
         x = self.pos_enc(x)
@@ -287,8 +310,17 @@ class ConformerEncoder(nn.Module):
         if lengths is not None:
             mask = torch.arange(x.size(1), device=x.device).unsqueeze(0) >= lengths.unsqueeze(1)
         
-        for layer in self.layers:
+        for i, layer in enumerate(self.layers):
             x = layer(x, mask)
+            # NaN safety after each conformer layer
+            if x.isnan().any():
+                print(f"[ENCODER ERROR] NaN after Conformer layer {i}!")
+                x = torch.nan_to_num(x, nan=0.0)
+        
+        # Final validation
+        encoder_var = x.var(dim=-1).mean()
+        if encoder_var < 1e-8:
+            print(f"[ENCODER WARNING] Encoder output collapsed! Variance: {encoder_var:.2e}")
         
         return x, lengths, mask
 
@@ -447,15 +479,23 @@ class TransformerDecoder(nn.Module):
         self,
         memory: torch.Tensor,
         memory_mask: Optional[torch.Tensor] = None,
-        max_len: int = 100
+        max_len: int = 100,
+        temperature: float = 1.0,
+        top_k: int = 0,
+        top_p: float = 0.0,
+        repetition_penalty: float = 1.0
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        Greedy decoding for inference.
+        Greedy/sampling decoding for inference with diversity controls.
         
         Args:
             memory: (B, T, d_model) encoder output
             memory_mask: (B, T) encoder padding mask
             max_len: Maximum output length
+            temperature: Sampling temperature (1.0=normal, >1.0=more random, <1.0=more focused)
+            top_k: If >0, only sample from top k tokens
+            top_p: If >0, use nucleus sampling (0.9 recommended)
+            repetition_penalty: Penalty for repeating tokens (1.0=none, 1.2=recommended)
             
         Returns:
             output_ids: (B, L)
@@ -463,6 +503,19 @@ class TransformerDecoder(nn.Module):
         """
         B = memory.size(0)
         device = memory.device
+        
+        # ===== VALIDATE ENCODER MEMORY =====
+        if memory.isnan().any():
+            print("[DECODER ERROR] NaN in encoder memory! Clamping...")
+            memory = torch.nan_to_num(memory, nan=0.0)
+        if memory.isinf().any():
+            print("[DECODER ERROR] Inf in encoder memory! Clamping...")
+            memory = torch.clamp(memory, min=-1e6, max=1e6)
+        
+        # Check encoder output diversity
+        memory_var = memory.var(dim=-1).mean()
+        if memory_var < 1e-6:
+            print(f"[DECODER WARNING] Encoder output has very low variance ({memory_var:.2e}) - likely to produce same output!")
         
         # Start with BOS
         outputs = torch.full((B, 1), self.config.bos_id, dtype=torch.long, device=device)
@@ -481,10 +534,48 @@ class TransformerDecoder(nn.Module):
             x = self.final_norm(x)
             logits = self.output_proj(x[:, -1])  # Only last position
             
-            probs = F.softmax(logits, dim=-1)
-            next_token = probs.argmax(dim=-1, keepdim=True)
-            scores[:, i] = probs.gather(1, next_token).squeeze(1)
+            # ===== APPLY REPETITION PENALTY =====
+            if repetition_penalty != 1.0:
+                for b in range(B):
+                    for prev_token in outputs[b].tolist():
+                        if 0 <= prev_token < logits.size(-1):
+                            logits[b, prev_token] = logits[b, prev_token] / repetition_penalty
             
+            # ===== APPLY TEMPERATURE =====
+            if temperature != 1.0 and temperature > 0:
+                logits = logits / temperature
+            
+            # ===== APPLY TOP-K FILTERING =====
+            if top_k > 0:
+                top_k_vals = torch.topk(logits, min(top_k, logits.size(-1)))[0]
+                threshold = top_k_vals[..., -1, None]
+                logits = torch.where(logits < threshold, torch.full_like(logits, float('-inf')), logits)
+            
+            # ===== APPLY TOP-P (NUCLEUS) FILTERING =====
+            if top_p > 0.0 and top_p < 1.0:
+                sorted_logits, sorted_indices = torch.sort(logits, descending=True)
+                cumulative_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
+                
+                # Remove tokens with cumulative probability above threshold
+                sorted_indices_to_remove = cumulative_probs > top_p
+                sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
+                sorted_indices_to_remove[..., 0] = False
+                
+                for b in range(B):
+                    indices_to_remove = sorted_indices[b, sorted_indices_to_remove[b]]
+                    logits[b, indices_to_remove] = float('-inf')
+            
+            probs = F.softmax(logits, dim=-1)
+            
+            # ===== SELECT NEXT TOKEN =====
+            if top_k > 0 or top_p > 0:
+                # Sample from distribution
+                next_token = torch.multinomial(probs, num_samples=1)
+            else:
+                # Pure greedy (argmax)
+                next_token = probs.argmax(dim=-1, keepdim=True)
+            
+            scores[:, i] = probs.gather(1, next_token).squeeze(1)
             outputs = torch.cat([outputs, next_token], dim=1)
             
             # Check for EOS
@@ -715,17 +806,56 @@ class ISLTranslationModelV2(nn.Module):
         features: torch.Tensor,
         feature_lengths: Optional[torch.Tensor] = None,
         beam_size: int = 1,
-        max_len: int = 100
+        max_len: int = 100,
+        temperature: float = 1.0,
+        top_k: int = 0,
+        top_p: float = 0.0,
+        repetition_penalty: float = 1.2
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        Transformer decoder inference.
+        Transformer decoder inference with diversity controls.
         
-        Higher quality, slightly more latency.
+        Args:
+            features: (B, T, input_dim) input features
+            feature_lengths: (B,) sequence lengths
+            beam_size: Beam size (1 for greedy/sampling)
+            max_len: Maximum output length
+            temperature: Sampling temperature (1.0=normal, >1=random, <1=focused)
+            top_k: Top-k sampling (0 to disable)
+            top_p: Nucleus sampling threshold (0 to disable, 0.9 recommended)
+            repetition_penalty: Penalty for repeated tokens (1.2 recommended)
+            
+        Returns:
+            output_ids: (B, L)
+            output_scores: (B, L)
         """
+        # ===== INPUT VALIDATION =====
+        if features.isnan().any():
+            print("[DECODE ERROR] NaN in input features!")
+            features = torch.nan_to_num(features, nan=0.0)
+        if features.isinf().any():
+            print("[DECODE ERROR] Inf in input features!")
+            features = torch.clamp(features, min=-1e6, max=1e6)
+        
+        if features.numel() == 0:
+            print("[DECODE ERROR] Empty input features!")
+            return torch.zeros(0, 0, dtype=torch.long, device=features.device), torch.zeros(0, 0, device=features.device)
+        
         encoder_out, encoder_lengths, encoder_mask = self.encoder(features, feature_lengths)
         
+        # ===== ENCODER OUTPUT VALIDATION =====
+        if encoder_out.isnan().any():
+            print("[DECODE ERROR] NaN in encoder output!")
+            encoder_out = torch.nan_to_num(encoder_out, nan=0.0)
+        
         if beam_size == 1:
-            return self.decoder.decode_greedy(encoder_out, encoder_mask, max_len)
+            return self.decoder.decode_greedy(
+                encoder_out, encoder_mask, max_len,
+                temperature=temperature,
+                top_k=top_k,
+                top_p=top_p,
+                repetition_penalty=repetition_penalty
+            )
         else:
             results = self.decoder.decode_beam(encoder_out, encoder_mask, beam_size, max_len)
             # Return just the best sequences
