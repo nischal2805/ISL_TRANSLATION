@@ -138,7 +138,9 @@ class TrainerV2:
                         outputs['decoder_logits'],
                         outputs['encoder_lengths'],
                         targets,
-                        target_lengths
+                        target_lengths,
+                        outputs.get('cross_attention_weights'),
+                        outputs.get('gate_values')  # Pass gate values for regularization
                     )
                     loss = losses['loss'] / self.grad_accum_steps
                 
@@ -151,7 +153,9 @@ class TrainerV2:
                     outputs['decoder_logits'],
                     outputs['encoder_lengths'],
                     targets,
-                    target_lengths
+                    target_lengths,
+                    outputs.get('cross_attention_weights'),
+                    outputs.get('gate_values')  # Pass gate values for regularization
                 )
                 loss = losses['loss'] / self.grad_accum_steps
                 loss.backward()
@@ -218,7 +222,9 @@ class TrainerV2:
                 outputs['decoder_logits'],
                 outputs['encoder_lengths'],
                 targets,
-                target_lengths
+                target_lengths,
+                outputs.get('cross_attention_weights'),
+                outputs.get('gate_values')  # Pass gate values for regularization
             )
             
             total_loss += losses['loss'].item()

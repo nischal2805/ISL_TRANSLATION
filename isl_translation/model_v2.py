@@ -33,18 +33,18 @@ class ModelConfig:
     # 204 dims (hands + body + mouth + head) × 3 (pos + vel + acc) = 612
     input_dim: int = 612
     
-    # Encoder
-    d_model: int = 256
+    # Encoder - INCREASED for better capacity
+    d_model: int = 384  # Increased from 256 for better representation
     num_cnn_blocks: int = 2
-    num_encoder_layers: int = 4  # More for better accuracy
-    encoder_heads: int = 4
-    encoder_ff_dim: int = 1024
+    num_encoder_layers: int = 6  # Increased from 4 for deeper encoding
+    encoder_heads: int = 6  # Increased to match d_model/64
+    encoder_ff_dim: int = 1536  # 4x d_model
     conv_kernel_size: int = 31
     
     # Decoder (Transformer)
     num_decoder_layers: int = 4
-    decoder_heads: int = 4
-    decoder_ff_dim: int = 1024
+    decoder_heads: int = 6  # Match encoder heads
+    decoder_ff_dim: int = 1536  # 4x d_model
     
     # Vocab
     vocab_size: int = 2000  # BPE vocab size
@@ -305,10 +305,19 @@ class TransformerDecoderLayer(nn.Module):
         self.self_attn = nn.MultiheadAttention(d_model, num_heads, dropout=dropout, batch_first=True)
         self.self_attn_dropout = nn.Dropout(dropout)
         
-        # Cross-attention
+        # Cross-attention - CRITICAL for encoder conditioning
         self.cross_attn_norm = nn.LayerNorm(d_model)
         self.cross_attn = nn.MultiheadAttention(d_model, num_heads, dropout=dropout, batch_first=True)
         self.cross_attn_dropout = nn.Dropout(dropout)
+        
+        # Gate to control encoder vs language model influence
+        # Initialize with positive bias to favor encoder from the start
+        self.encoder_gate = nn.Sequential(
+            nn.Linear(d_model * 2, d_model),
+            nn.Sigmoid()
+        )
+        # Initialize gate bias to +2.0 so sigmoid(2)=0.88 -> 88% encoder influence
+        nn.init.constant_(self.encoder_gate[0].bias, 2.0)
         
         # Feed-forward
         self.ff_norm = nn.LayerNorm(d_model)
@@ -319,6 +328,8 @@ class TransformerDecoderLayer(nn.Module):
             nn.Linear(ff_dim, d_model),
             nn.Dropout(dropout)
         )
+        
+        self.d_model = d_model
     
     def forward(
         self,
@@ -326,27 +337,32 @@ class TransformerDecoderLayer(nn.Module):
         memory: torch.Tensor,
         tgt_mask: Optional[torch.Tensor] = None,
         memory_mask: Optional[torch.Tensor] = None
-    ) -> torch.Tensor:
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         # Masked self-attention
         residual = x
-        x = self.self_attn_norm(x)
-        x, _ = self.self_attn(x, x, x, attn_mask=tgt_mask)
-        x = torch.nan_to_num(x, nan=0.0)
-        x = residual + self.self_attn_dropout(x)
+        x_norm = self.self_attn_norm(x)
+        attn_out, _ = self.self_attn(x_norm, x_norm, x_norm, attn_mask=tgt_mask)
+        x = residual + self.self_attn_dropout(attn_out)
         
-        # Cross-attention
+        # Cross-attention with gating mechanism
         residual = x
-        x = self.cross_attn_norm(x)
-        x, _ = self.cross_attn(x, memory, memory, key_padding_mask=memory_mask)
-        x = torch.nan_to_num(x, nan=0.0)
-        x = residual + self.cross_attn_dropout(x)
+        x_norm = self.cross_attn_norm(x)
+        cross_out, cross_weights = self.cross_attn(x_norm, memory, memory, key_padding_mask=memory_mask)
+        
+        # Gate: how much to use encoder vs language model
+        gate_input = torch.cat([x, cross_out], dim=-1)
+        gate = self.encoder_gate(gate_input)
+        
+        # Apply gate: gate=1 means use encoder, gate=0 means ignore encoder
+        x = residual + self.cross_attn_dropout(gate * cross_out)
         
         # Feed-forward
         residual = x
-        x = self.ff_norm(x)
-        x = residual + self.ff(x)
+        x_norm = self.ff_norm(x)
+        x = residual + self.ff(x_norm)
         
-        return x
+        # Return gate values for regularization
+        return x, cross_weights, gate
 
 
 class TransformerDecoder(nn.Module):
@@ -406,9 +422,17 @@ class TransformerDecoder(nn.Module):
         # Causal mask
         causal_mask = self._generate_causal_mask(L, targets.device)
         
-        # Decoder layers
+        # Decoder layers - collect both attention weights and gate values
+        all_cross_weights = []
+        all_gate_values = []
         for layer in self.layers:
-            x = layer(x, memory, causal_mask, memory_mask)
+            x, cross_weights, gate = layer(x, memory, causal_mask, memory_mask)
+            all_cross_weights.append(cross_weights)
+            all_gate_values.append(gate)
+        
+        # Store last layer attention and gate values for debugging and regularization
+        self.last_cross_attention_weights = all_cross_weights[-1] if all_cross_weights else None
+        self.last_gate_values = all_gate_values  # Store all layer gate values
         
         x = self.final_norm(x)
         logits = self.output_proj(x)
@@ -449,7 +473,7 @@ class TransformerDecoder(nn.Module):
             causal_mask = self._generate_causal_mask(outputs.size(1), device)
             
             for layer in self.layers:
-                x = layer(x, memory, causal_mask, memory_mask)
+                x, _, _ = layer(x, memory, causal_mask, memory_mask)
             
             x = self.final_norm(x)
             logits = self.output_proj(x[:, -1])  # Only last position
@@ -507,7 +531,7 @@ class TransformerDecoder(nn.Module):
                     causal_mask = self._generate_causal_mask(seq.size(1), device)
                     
                     for layer in self.layers:
-                        x = layer(x, mem, causal_mask, mem_mask)
+                        x, _, _ = layer(x, mem, causal_mask, mem_mask)
                     
                     x = self.final_norm(x)
                     logits = self.output_proj(x[:, -1])
@@ -599,6 +623,10 @@ class ISLTranslationModelV2(nn.Module):
         
         # Initialize weights
         self._init_weights()
+        
+        # CRITICAL: Initialize gate biases AFTER _init_weights() to +2.0
+        # This ensures gates start at sigmoid(2)=0.88 (88% encoder influence)
+        self._init_gate_biases()
     
     def _init_weights(self):
         """Initialize weights with Xavier/Kaiming."""
@@ -611,6 +639,14 @@ class ISLTranslationModelV2(nn.Module):
                 nn.init.normal_(module.weight, mean=0, std=self.config.d_model ** -0.5)
                 if module.padding_idx is not None:
                     nn.init.zeros_(module.weight[module.padding_idx])
+    
+    def _init_gate_biases(self):
+        """Initialize encoder gate biases to +2.0 for high encoder influence."""
+        for layer in self.decoder.layers:
+            if hasattr(layer, 'encoder_gate'):
+                # encoder_gate is nn.Sequential(Linear, Sigmoid)
+                # The Linear layer is at index 0
+                nn.init.constant_(layer.encoder_gate[0].bias, 2.0)
     
     def forward(
         self,
@@ -629,7 +665,7 @@ class ISLTranslationModelV2(nn.Module):
             target_lengths: (B,) target lengths
             
         Returns:
-            dict with ctc_log_probs, decoder_logits, encoder_lengths
+            dict with ctc_log_probs, decoder_logits, encoder_lengths, cross_attention_weights
         """
         # Encode
         encoder_out, encoder_lengths, encoder_mask = self.encoder(features, feature_lengths)
@@ -640,10 +676,16 @@ class ISLTranslationModelV2(nn.Module):
         # Decoder output (teacher forcing)
         decoder_logits = self.decoder(targets, encoder_out, encoder_mask)
         
+        # Get cross-attention weights and gate values for regularization
+        cross_attn_weights = self.decoder.last_cross_attention_weights
+        gate_values = self.decoder.last_gate_values  # List of gate tensors per layer
+        
         return {
             'ctc_log_probs': ctc_log_probs,
             'decoder_logits': decoder_logits,
-            'encoder_lengths': encoder_lengths
+            'encoder_lengths': encoder_lengths,
+            'cross_attention_weights': cross_attn_weights,
+            'gate_values': gate_values  # NEW: for gate regularization
         }
     
     @torch.no_grad()
@@ -747,9 +789,12 @@ def create_streaming_model(model: ISLTranslationModelV2) -> StreamingEncoder:
 
 class HybridCTCAttentionLoss(nn.Module):
     """
-    Hybrid CTC-Attention loss.
+    Hybrid CTC-Attention loss with cross-attention and gate regularization.
     
-    loss = ctc_weight * CTC_loss + (1 - ctc_weight) * CE_loss
+    loss = ctc_weight * CTC_loss + (1 - ctc_weight) * CE_loss + attn_reg_weight * attention_reg + gate_reg_weight * gate_reg
+    
+    The attention regularization ensures the decoder actually uses encoder features.
+    The gate regularization penalizes gates that are too low (ignoring encoder).
     """
     
     def __init__(
@@ -758,12 +803,16 @@ class HybridCTCAttentionLoss(nn.Module):
         pad_id: int = 0,
         blank_id: int = 4,
         ctc_weight: float = 0.3,
-        label_smoothing: float = 0.1
+        label_smoothing: float = 0.1,
+        attn_reg_weight: float = 0.1,
+        gate_reg_weight: float = 0.05  # NEW: penalize low gates
     ):
         super().__init__()
         
         self.ctc_weight = ctc_weight
         self.blank_id = blank_id
+        self.attn_reg_weight = attn_reg_weight
+        self.gate_reg_weight = gate_reg_weight  # NEW
         
         self.ctc_loss = nn.CTCLoss(blank=blank_id, reduction='mean', zero_infinity=True)
         self.ce_loss = nn.CrossEntropyLoss(
@@ -778,10 +827,12 @@ class HybridCTCAttentionLoss(nn.Module):
         decoder_logits: torch.Tensor,  # (B, L, vocab)
         encoder_lengths: torch.Tensor,  # (B,)
         targets: torch.Tensor,  # (B, L) - for decoder CE loss
-        target_lengths: torch.Tensor  # (B,)
+        target_lengths: torch.Tensor,  # (B,)
+        cross_attention_weights: Optional[torch.Tensor] = None,  # (B, num_heads, L, T)
+        gate_values: Optional[List[torch.Tensor]] = None  # List of gate tensors per layer
     ) -> Dict[str, torch.Tensor]:
         """
-        Compute hybrid loss.
+        Compute hybrid loss with attention regularization.
         
         Args:
             ctc_log_probs: CTC output (already log_softmax)
@@ -789,9 +840,10 @@ class HybridCTCAttentionLoss(nn.Module):
             encoder_lengths: Encoder output lengths
             targets: Target sequences (shifted for decoder)
             target_lengths: Target lengths
+            cross_attention_weights: Cross-attention weights from last decoder layer
             
         Returns:
-            dict with total_loss, ctc_loss, ce_loss
+            dict with total_loss, ctc_loss, ce_loss, attn_reg_loss
         """
         # CTC loss expects (T, B, vocab)
         ctc_log_probs_t = ctc_log_probs.transpose(0, 1)
@@ -827,19 +879,64 @@ class HybridCTCAttentionLoss(nn.Module):
             ce_targets.view(-1)
         )
         
+        # Attention regularization - encourage using encoder features
+        attn_reg_loss = torch.tensor(0.0, device=targets.device)
+        if cross_attention_weights is not None and self.attn_reg_weight > 0:
+            # Average attention weights across heads: (B, num_heads, L, T) -> (B, L, T)
+            attn_weights = cross_attention_weights.mean(dim=1)
+            
+            # Entropy regularization: encourage focused attention
+            # Higher entropy = attention is spread out (bad)
+            # Lower entropy = attention is focused (good)
+            attn_probs = attn_weights + 1e-10  # Avoid log(0)
+            entropy = -(attn_probs * torch.log(attn_probs)).sum(dim=-1).mean()
+            
+            # Coverage: ensure all encoder positions are attended to at least once
+            # Sum attention over target sequence: (B, L, T) -> (B, T)
+            coverage = attn_weights.sum(dim=1)
+            # Penalize if any position has very low total attention
+            coverage_loss = torch.relu(0.1 - coverage).mean()
+            
+            attn_reg_loss = entropy + coverage_loss
+        
+        # Gate regularization - penalize gates that are too low
+        gate_reg_loss = torch.tensor(0.0, device=targets.device)
+        if gate_values is not None and self.gate_reg_weight > 0:
+            # Penalize low gate values: loss = (1 - gate)^2
+            # This encourages gates to stay high (using encoder info)
+            gate_penalties = []
+            for gate in gate_values:
+                # gate shape: (B, L, d_model)
+                avg_gate = gate.mean()  # Average gate value
+                # Penalize if gate < 0.7 (want at least 70% encoder influence)
+                penalty = torch.relu(0.7 - avg_gate) ** 2
+                gate_penalties.append(penalty)
+            gate_reg_loss = sum(gate_penalties) / len(gate_penalties)
+        
         # Handle NaN
         if torch.isnan(ctc_loss):
             ctc_loss = torch.tensor(0.0, device=targets.device)
         if torch.isnan(ce_loss):
             ce_loss = torch.tensor(0.0, device=targets.device)
+        if torch.isnan(attn_reg_loss):
+            attn_reg_loss = torch.tensor(0.0, device=targets.device)
+        if torch.isnan(gate_reg_loss):
+            gate_reg_loss = torch.tensor(0.0, device=targets.device)
         
-        # Combine
-        total_loss = self.ctc_weight * ctc_loss + (1 - self.ctc_weight) * ce_loss
+        # Combine - all loss components
+        total_loss = (
+            self.ctc_weight * ctc_loss + 
+            (1 - self.ctc_weight) * ce_loss + 
+            self.attn_reg_weight * attn_reg_loss +
+            self.gate_reg_weight * gate_reg_loss  # NEW: gate regularization
+        )
         
         return {
             'loss': total_loss,
             'ctc_loss': ctc_loss,
-            'ce_loss': ce_loss
+            'ce_loss': ce_loss,
+            'attn_reg_loss': attn_reg_loss,
+            'gate_reg_loss': gate_reg_loss  # NEW
         }
 
 
