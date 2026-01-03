@@ -394,22 +394,19 @@ class TrainerV2:
 def main():
     parser = argparse.ArgumentParser(description='Train ISL Translation V2')
     
-    # Data paths - Server paths for A100 GPU
-    parser.add_argument('--train-dir', type=str, 
-                       default='/media/rvcse22/CSERV/kortex_sem5/data/train/train',
-                       help='Training data directory')
-    parser.add_argument('--val-dir', type=str,
-                       default='/media/rvcse22/CSERV/kortex_sem5/data/val',
-                       help='Validation data directory')
-    parser.add_argument('--test-dir', type=str,
-                       default='/media/rvcse22/CSERV/kortex_sem5/data/test/test',
-                       help='Test data directory')
+    # Data paths - UPDATED to use new unified pipeline
+    parser.add_argument('--data-dir', type=str, 
+                       default='E:/5thsem el/APPROACH 2/video_features',
+                       help='Directory with preprocessed .npy files')
+    parser.add_argument('--metadata', type=str,
+                       default='E:/5thsem el/APPROACH 2/video_features/metadata.csv',
+                       help='Metadata CSV with train/val/test splits')
     parser.add_argument('--tokenizer-dir', type=str,
-                       default='/media/rvcse22/CSERV/kortex_sem5/nischal/isl_translation/tokenizer_model',
+                       default='E:/5thsem el/APPROACH 2/isl_translation/tokenizer_model',
                        help='Directory with trained tokenizer')
     parser.add_argument('--annotations', type=str,
-                       default='/media/rvcse22/CSERV/kortex_sem5/data/iSign_v1.1.csv',
-                       help='Annotations CSV')
+                       default='E:/5thsem el/APPROACH 2/iSign_v1.1.csv',
+                       help='Annotations CSV (for tokenizer training if needed)')
     
     # Model config
     parser.add_argument('--vocab-size', type=int, default=2000)
@@ -425,7 +422,7 @@ def main():
     parser.add_argument('--lr', type=float, default=1e-4)
     parser.add_argument('--warmup-steps', type=int, default=4000)
     parser.add_argument('--gradient-accumulation', type=int, default=1)
-    parser.add_argument('--num-workers', type=int, default=8)
+    parser.add_argument('--num-workers', type=int, default=4)
     parser.add_argument('--patience', type=int, default=15)
     
     # Checkpointing
@@ -462,6 +459,7 @@ def main():
     
     # Create model config
     model_config = ModelConfig(
+        input_dim=540,  # NEW: 180 × 3 (pos + vel + acc)
         vocab_size=tokenizer.size,
         d_model=args.d_model,
         num_encoder_layers=args.encoder_layers,
@@ -475,7 +473,7 @@ def main():
     model = create_model_v2(model_config)
     print(f"Model parameters: {model.count_parameters():,}")
     
-    # Create loss function
+    # Create loss function with STRONG gate regularization
     loss_fn = HybridCTCAttentionLoss(
         vocab_size=model_config.vocab_size,
         pad_id=model_config.pad_id,
@@ -486,20 +484,11 @@ def main():
         gate_reg_weight=0.2   # Gate regularization - CRITICAL for preventing mode collapse
     )
     
-    # Create dataloaders
+    # Create dataloaders using NEW unified pipeline
     print("\nCreating dataloaders...")
-    from dataset_v2 import create_simple_dataloaders
-    import pandas as pd
-    
-    # Load annotations for text labels
-    df = pd.read_csv(args.annotations)
-    uid_to_text = dict(zip(df['uid'].astype(str), df['text']))
-    
-    train_loader, val_loader, test_loader = create_simple_dataloaders(
-        train_dir=args.train_dir,
-        val_dir=args.val_dir,
-        test_dir=args.test_dir,
-        uid_to_text=uid_to_text,
+    train_loader, val_loader, test_loader = create_dataloaders_v2(
+        data_dir=args.data_dir,
+        metadata_path=args.metadata,
         tokenizer=tokenizer,
         batch_size=args.batch_size,
         num_workers=args.num_workers

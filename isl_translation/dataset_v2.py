@@ -1,6 +1,8 @@
 """
 Dataset for ISL Translation V2 with BPE Tokenizer
 =================================================
+Loads preprocessed .npy files with velocity/acceleration features (540 dims).
+Compatible with extract_video_features.py output.
 """
 
 import os
@@ -16,8 +18,8 @@ class ISLDatasetV2(Dataset):
     """
     Dataset for ISL Translation V2.
     
-    Uses BPE tokenizer and preprocessed landmarks with velocity/acceleration.
-    Supports both split-based (train/val/test folders) and flat directory structure.
+    Uses BPE tokenizer and preprocessed landmarks (540 dims = 180 raw × 3).
+    Loads from metadata.csv created by extract_video_features.py.
     """
     
     def __init__(
@@ -32,7 +34,7 @@ class ISLDatasetV2(Dataset):
         """
         Args:
             data_dir: Directory with .npy feature files
-            metadata_path: Path to metadata.csv
+            metadata_path: Path to metadata.csv (created by extract_video_features.py)
             tokenizer: BPETokenizer instance
             split: 'train', 'val', or 'test'
             max_src_len: Maximum source sequence length
@@ -48,11 +50,8 @@ class ISLDatasetV2(Dataset):
         metadata = pd.read_csv(metadata_path)
         self.samples = metadata[metadata['split'] == split].reset_index(drop=True)
         
-        # Check if split folders exist or flat structure
-        self.use_split_folders = (self.data_dir / split).exists()
-        
-        print(f"Loaded {len(self.samples)} {split} samples")
-        print(f"  Data structure: {'split folders' if self.use_split_folders else 'flat directory'}")
+        print(f"Loaded {len(self.samples)} {split} samples from {metadata_path}")
+        print(f"  Data directory: {self.data_dir}")
     
     def __len__(self) -> int:
         return len(self.samples)
@@ -60,13 +59,17 @@ class ISLDatasetV2(Dataset):
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
         row = self.samples.iloc[idx]
         
-        # Load features - check both split folder and flat structure
-        if self.use_split_folders:
-            feature_path = self.data_dir / self.split / f"{row['video_id']}.npy"
-        else:
-            feature_path = self.data_dir / f"{row['video_id']}.npy"
+        # Load features (540 dims = 180 × 3)
+        feature_path = self.data_dir / f"{row['video_id']}.npy"
+        
+        if not feature_path.exists():
+            raise FileNotFoundError(f"Feature file not found: {feature_path}")
         
         features = np.load(feature_path)
+        
+        # Verify feature dimension
+        if features.shape[1] != 540:
+            raise ValueError(f"Expected 540 dims, got {features.shape[1]} for {row['video_id']}")
         
         # Truncate if needed
         if features.shape[0] > self.max_src_len:
@@ -133,6 +136,15 @@ def create_dataloaders_v2(
     """
     Create train, val, test dataloaders.
     
+    Args:
+        data_dir: Directory with .npy files (output from extract_video_features.py)
+        metadata_path: Path to metadata.csv (created by extract_video_features.py)
+        tokenizer: BPE tokenizer
+        batch_size: Batch size
+        num_workers: Number of data loading workers
+        max_src_len: Max source sequence length
+        max_tgt_len: Max target sequence length
+        
     Returns:
         train_loader, val_loader, test_loader
     """

@@ -5,9 +5,16 @@ output_preprocessed_v2/
 preprocessed_v2/
 preprocessed_v2_fp16/
 video_features/
+isl_fresh/data/
+
+# Logs
+logs/
+logs_v2/
+logs_fresh/
 
 # Model checkpoints
 checkpoints/
+checkpoints_fresh/
 runs/
 *.pt
 *.pth

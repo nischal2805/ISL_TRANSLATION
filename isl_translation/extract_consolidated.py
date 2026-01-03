@@ -1,11 +1,11 @@
 """
-Extract pose landmarks from ISL videos for translation.
-Processes 127K videos using multicore processing.
+Extract video features and save as SINGLE consolidated .npy file
+================================================================
+For easy SCP transfer to server: ONE file instead of 127K files!
 
-Output Strategy:
-- Individual .npy files per video (for compatibility with existing pipeline)
-- Consolidated metadata CSV with train/val/test splits
-- Features: 180 dims (hands + upper body + key face points) × 3 (pos + vel + acc) = 540 dims
+Output:
+- video_features_all.npy: (N, max_T, 540) all features padded
+- video_metadata.csv: video_id, text, length, split
 """
 
 import cv2
@@ -18,6 +18,7 @@ import multiprocessing as mproc
 from typing import Dict, List, Tuple
 from scipy.ndimage import gaussian_filter1d
 import warnings
+import gc
 warnings.filterwarnings('ignore')
 
 
@@ -32,11 +33,10 @@ class Config:
     OUTPUT_DIR = Path("E:/5thsem el/APPROACH 2/video_features")
     
     # Video processing
-    TARGET_FPS = 10  # Downsample to 10fps for efficiency
+    TARGET_FPS = 10  # Downsample to 10fps
     MAX_FRAMES = 150  # Max 15 seconds at 10fps
     
     # Pose extraction
-    EXTRACT_POSE = True
     POSE_CONFIDENCE = 0.5
     
     # Feature dimensions
@@ -47,7 +47,7 @@ class Config:
     SMOOTHING_SIGMA = 1.0
     
     # Multiprocessing
-    NUM_WORKERS = 14  # Adjust based on CPU cores
+    NUM_WORKERS = 12  # Adjust based on CPU cores
     
     # Split ratios
     TRAIN_RATIO = 0.70
@@ -56,7 +56,7 @@ class Config:
 
 
 # ============================================================================
-# Preprocessing Functions (Applied during extraction)
+# Preprocessing Functions
 # ============================================================================
 
 def compute_velocity(features: np.ndarray) -> np.ndarray:
@@ -76,7 +76,7 @@ def compute_acceleration(velocity: np.ndarray) -> np.ndarray:
 
 
 def smooth_features(features: np.ndarray, sigma: float = 1.0) -> np.ndarray:
-    """Apply Gaussian smoothing to reduce jitter."""
+    """Apply Gaussian smoothing."""
     if sigma <= 0 or features.shape[0] < 3:
         return features
     return gaussian_filter1d(features, sigma=sigma, axis=0, mode='nearest')
@@ -102,35 +102,29 @@ class PoseExtractor:
         """Extract landmarks from a single frame.
         
         Returns:
-            landmarks: (204,) array or None if detection fails
-                      [hands(42*3) + pose(33*3) + face(468*3 downsampled to 40*3)]
+            landmarks: (180,) array
         """
-        # Convert BGR to RGB
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        
-        # Process
         results = self.holistic.process(rgb)
         
-        # Extract landmarks
         landmarks = []
         
-        # Left hand (21 landmarks * 3 coords = 63)
+        # Left hand (21 * 3 = 63)
         if results.left_hand_landmarks:
             for lm in results.left_hand_landmarks.landmark:
                 landmarks.extend([lm.x, lm.y, lm.z])
         else:
             landmarks.extend([0.0] * 63)
         
-        # Right hand (21 landmarks * 3 coords = 63)
+        # Right hand (21 * 3 = 63)
         if results.right_hand_landmarks:
             for lm in results.right_hand_landmarks.landmark:
                 landmarks.extend([lm.x, lm.y, lm.z])
         else:
             landmarks.extend([0.0] * 63)
         
-        # Pose (33 landmarks * 3 coords = 99, but we keep only upper body = 13*3 = 39)
+        # Pose - upper body (13 * 3 = 39)
         if results.pose_landmarks:
-            # Keep only upper body: 0-10 (face/shoulders), 11-12 (shoulders), 13-16 (elbows/wrists)
             upper_body_indices = list(range(13))
             for idx in upper_body_indices:
                 lm = results.pose_landmarks.landmark[idx]
@@ -138,16 +132,16 @@ class PoseExtractor:
         else:
             landmarks.extend([0.0] * 39)
         
-        # Face (sample 5 key points: nose, eyes, mouth corners)
+        # Face key points (5 * 3 = 15)
         if results.face_landmarks:
-            key_face_indices = [1, 33, 263, 61, 291]  # nose, left eye, right eye, left mouth, right mouth
+            key_face_indices = [1, 33, 263, 61, 291]
             for idx in key_face_indices:
                 lm = results.face_landmarks.landmark[idx]
                 landmarks.extend([lm.x, lm.y, lm.z])
         else:
             landmarks.extend([0.0] * 15)
         
-        return np.array(landmarks, dtype=np.float32)  # Total: 63+63+39+15 = 180 dims
+        return np.array(landmarks, dtype=np.float32)
     
     def __del__(self):
         self.holistic.close()
@@ -158,28 +152,14 @@ class PoseExtractor:
 # ============================================================================
 
 def process_single_video(args: Tuple[str, str, Path]) -> Dict:
-    """Process one video file - extract landmarks and preprocess.
-    
-    Args:
-        args: (video_id, text, video_path)
-    
-    Returns:
-        dict with status and output path
-    """
+    """Process one video file."""
     video_id, text, video_path = args
     
-    # Check if already processed
-    output_path = Config.OUTPUT_DIR / f"{video_id}.npy"
-    if output_path.exists():
-        return {'status': 'skipped', 'video_id': video_id}
-    
     try:
-        # Open video
         cap = cv2.VideoCapture(str(video_path))
         if not cap.isOpened():
             return {'status': 'error', 'reason': 'cannot_open', 'video_id': video_id}
         
-        # Get video properties
         original_fps = cap.get(cv2.CAP_PROP_FPS)
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         
@@ -187,12 +167,9 @@ def process_single_video(args: Tuple[str, str, Path]) -> Dict:
             cap.release()
             return {'status': 'error', 'reason': 'invalid_video', 'video_id': video_id}
         
-        # Calculate frame sampling
         frame_skip = max(1, int(original_fps / Config.TARGET_FPS))
         
-        # Initialize pose extractor
         pose_extractor = PoseExtractor()
-        
         landmarks_list = []
         frame_idx = 0
         
@@ -201,14 +178,11 @@ def process_single_video(args: Tuple[str, str, Path]) -> Dict:
             if not ret:
                 break
             
-            # Sample frames
             if frame_idx % frame_skip == 0:
-                # Extract pose landmarks
                 lm = pose_extractor.extract(frame)
                 if lm is not None:
                     landmarks_list.append(lm)
                 
-                # Stop if max frames reached
                 if len(landmarks_list) >= Config.MAX_FRAMES:
                     break
             
@@ -217,37 +191,25 @@ def process_single_video(args: Tuple[str, str, Path]) -> Dict:
         cap.release()
         del pose_extractor
         
-        # Check if valid
-        if len(landmarks_list) < 5:  # Too short
+        if len(landmarks_list) < 5:
             return {'status': 'error', 'reason': 'too_short', 'video_id': video_id}
         
-        # Convert to numpy array (T, 180)
+        # Preprocess
         raw_landmarks = np.array(landmarks_list, dtype=np.float32)
-        
-        # Apply preprocessing: smoothing + velocity + acceleration
-        # Step 1: Smooth raw positions
         smoothed_pos = smooth_features(raw_landmarks, sigma=Config.SMOOTHING_SIGMA)
-        
-        # Step 2: Compute velocity
         velocity = compute_velocity(smoothed_pos)
         velocity = smooth_features(velocity, sigma=Config.SMOOTHING_SIGMA)
-        
-        # Step 3: Compute acceleration
         acceleration = compute_acceleration(velocity)
         acceleration = smooth_features(acceleration, sigma=Config.SMOOTHING_SIGMA)
         
-        # Step 4: Concatenate all features (T, 180) -> (T, 540)
         features = np.concatenate([smoothed_pos, velocity, acceleration], axis=1).astype(np.float32)
-        
-        # Save as .npy (consistent with dataset_v2.py expectations)
-        np.save(output_path, features)
         
         return {
             'status': 'success',
             'video_id': video_id,
-            'num_frames': len(landmarks_list),
             'text': text,
-            'output_path': str(output_path)
+            'features': features,  # (T, 540)
+            'num_frames': features.shape[0]
         }
         
     except Exception as e:
@@ -255,63 +217,16 @@ def process_single_video(args: Tuple[str, str, Path]) -> Dict:
 
 
 # ============================================================================
-# Main
+# Main - Creates SINGLE consolidated file
 # ============================================================================
-
-def create_metadata_with_splits(df: pd.DataFrame, results: List[Dict], output_dir: Path):
-    """Create metadata CSV with train/val/test splits."""
-    
-    # Filter to successful extractions
-    successful = {r['video_id']: r for r in results if r['status'] == 'success'}
-    
-    metadata = []
-    for _, row in df.iterrows():
-        video_id = row['uid']
-        if video_id in successful:
-            metadata.append({
-                'video_id': video_id,
-                'text': row['text'],
-                'num_frames': successful[video_id]['num_frames']
-            })
-    
-    meta_df = pd.DataFrame(metadata)
-    
-    # Create random train/val/test split
-    np.random.seed(42)
-    n = len(meta_df)
-    indices = np.random.permutation(n)
-    
-    train_end = int(n * Config.TRAIN_RATIO)
-    val_end = int(n * (Config.TRAIN_RATIO + Config.VAL_RATIO))
-    
-    meta_df['split'] = 'test'
-    meta_df.loc[meta_df.index[indices[:train_end]], 'split'] = 'train'
-    meta_df.loc[meta_df.index[indices[train_end:val_end]], 'split'] = 'val'
-    
-    # Save metadata
-    metadata_path = output_dir / 'metadata.csv'
-    meta_df.to_csv(metadata_path, index=False)
-    
-    print(f"\n{'='*70}")
-    print("DATASET SPLITS")
-    print("="*70)
-    print(f"Train: {(meta_df['split'] == 'train').sum()} samples ({Config.TRAIN_RATIO*100:.0f}%)")
-    print(f"Val:   {(meta_df['split'] == 'val').sum()} samples ({Config.VAL_RATIO*100:.0f}%)")
-    print(f"Test:  {(meta_df['split'] == 'test').sum()} samples ({Config.TEST_RATIO*100:.0f}%)")
-    print(f"Metadata saved: {metadata_path}")
-    
-    return meta_df
-
 
 def main():
     print("="*70)
-    print("ISL VIDEO FEATURE EXTRACTION + PREPROCESSING")
+    print("ISL VIDEO FEATURE EXTRACTION - CONSOLIDATED OUTPUT")
     print("="*70)
-    print(f"Output format: .npy files with preprocessed features")
-    print(f"Feature dimensions: {Config.RAW_DIM} (raw) → {Config.OUTPUT_DIM} (with vel+acc)")
+    print(f"Output: SINGLE .npy file for easy SCP transfer")
     print("="*70)
     
-    # Create output directory
     Config.OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     
     # Load CSV
@@ -335,38 +250,109 @@ def main():
     
     print(f"Found {len(tasks)} videos ({missing_videos} missing)")
     
-    # Process videos
+    # Process in batches to avoid memory issues
+    BATCH_SIZE = 5000
+    all_results = []
+    
     print(f"\nProcessing with {Config.NUM_WORKERS} workers...")
-    print(f"Config: {Config.TARGET_FPS}fps, max {Config.MAX_FRAMES} frames, sigma={Config.SMOOTHING_SIGMA}")
     
-    # Multiprocessing
-    with mproc.Pool(processes=Config.NUM_WORKERS) as pool:
-        results = list(tqdm(
-            pool.imap(process_single_video, tasks),
-            total=len(tasks),
-            desc="Extracting+Preprocessing"
-        ))
+    for batch_start in range(0, len(tasks), BATCH_SIZE):
+        batch_end = min(batch_start + BATCH_SIZE, len(tasks))
+        batch_tasks = tasks[batch_start:batch_end]
+        
+        print(f"\nBatch {batch_start//BATCH_SIZE + 1}: Processing videos {batch_start+1} to {batch_end}")
+        
+        with mproc.Pool(processes=Config.NUM_WORKERS) as pool:
+            batch_results = list(tqdm(
+                pool.imap(process_single_video, batch_tasks),
+                total=len(batch_tasks),
+                desc="Extracting"
+            ))
+        
+        all_results.extend(batch_results)
+        gc.collect()
     
-    # Summary
-    success = sum(1 for r in results if r['status'] == 'success')
-    skipped = sum(1 for r in results if r['status'] == 'skipped')
-    errors = sum(1 for r in results if r['status'] == 'error')
+    # Filter successful results
+    successful = [r for r in all_results if r['status'] == 'success']
+    errors = len(all_results) - len(successful)
     
-    print("\n" + "="*70)
-    print("EXTRACTION COMPLETE")
+    print(f"\n{'='*70}")
+    print(f"Extraction complete: {len(successful)} success, {errors} errors")
+    
+    # Create splits
+    np.random.seed(42)
+    n = len(successful)
+    indices = np.random.permutation(n)
+    
+    train_end = int(n * Config.TRAIN_RATIO)
+    val_end = int(n * (Config.TRAIN_RATIO + Config.VAL_RATIO))
+    
+    splits = ['test'] * n
+    for i in indices[:train_end]:
+        splits[i] = 'train'
+    for i in indices[train_end:val_end]:
+        splits[i] = 'val'
+    
+    # Create metadata
+    metadata = []
+    for i, r in enumerate(successful):
+        metadata.append({
+            'idx': i,
+            'video_id': r['video_id'],
+            'text': r['text'],
+            'num_frames': r['num_frames'],
+            'split': splits[i]
+        })
+    
+    meta_df = pd.DataFrame(metadata)
+    
+    # Save metadata
+    meta_path = Config.OUTPUT_DIR / 'video_metadata.csv'
+    meta_df.to_csv(meta_path, index=False)
+    
+    print(f"\nSplit distribution:")
+    print(f"  Train: {(meta_df['split'] == 'train').sum()}")
+    print(f"  Val:   {(meta_df['split'] == 'val').sum()}")
+    print(f"  Test:  {(meta_df['split'] == 'test').sum()}")
+    
+    # Save as consolidated numpy arrays (per split for easier handling)
+    print(f"\nSaving consolidated arrays...")
+    
+    for split in ['train', 'val', 'test']:
+        split_indices = meta_df[meta_df['split'] == split]['idx'].values
+        split_features = [successful[i]['features'] for i in split_indices]
+        split_lengths = [f.shape[0] for f in split_features]
+        
+        # Pad to max length in this split
+        max_len = max(split_lengths)
+        padded = np.zeros((len(split_features), max_len, Config.OUTPUT_DIM), dtype=np.float32)
+        
+        for i, feat in enumerate(split_features):
+            padded[i, :feat.shape[0]] = feat
+        
+        # Save
+        features_path = Config.OUTPUT_DIR / f'{split}_features.npy'
+        lengths_path = Config.OUTPUT_DIR / f'{split}_lengths.npy'
+        
+        np.save(features_path, padded)
+        np.save(lengths_path, np.array(split_lengths, dtype=np.int32))
+        
+        # Get file size
+        size_mb = features_path.stat().st_size / (1024 * 1024)
+        print(f"  {split}: {padded.shape} ({size_mb:.1f} MB)")
+    
+    print(f"\n{'='*70}")
+    print("FILES TO TRANSFER VIA SCP:")
     print("="*70)
-    print(f"Success: {success}/{len(tasks)}")
-    print(f"Skipped (already done): {skipped}")
-    print(f"Errors: {errors}")
-    print(f"Output: {Config.OUTPUT_DIR}")
-    
-    # Create metadata with splits
-    metadata_df = create_metadata_with_splits(df, results, Config.OUTPUT_DIR)
-    
-    # Save detailed results
-    results_path = Config.OUTPUT_DIR / "extraction_results.csv"
-    pd.DataFrame(results).to_csv(results_path, index=False)
-    print(f"Detailed results saved: {results_path}")
+    print(f"  1. {Config.OUTPUT_DIR / 'train_features.npy'}")
+    print(f"  2. {Config.OUTPUT_DIR / 'train_lengths.npy'}")
+    print(f"  3. {Config.OUTPUT_DIR / 'val_features.npy'}")
+    print(f"  4. {Config.OUTPUT_DIR / 'val_lengths.npy'}")
+    print(f"  5. {Config.OUTPUT_DIR / 'test_features.npy'}")
+    print(f"  6. {Config.OUTPUT_DIR / 'test_lengths.npy'}")
+    print(f"  7. {Config.OUTPUT_DIR / 'video_metadata.csv'}")
+    print(f"\nTotal: 7 files (vs 127K individual files!)")
+    print("="*70)
 
 
 if __name__ == "__main__":

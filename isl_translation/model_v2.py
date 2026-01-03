@@ -29,9 +29,9 @@ from dataclasses import dataclass
 @dataclass
 class ModelConfig:
     """Model configuration."""
-    # Input - V2 landmarks with face features
-    # 204 dims (hands + body + mouth + head) × 3 (pos + vel + acc) = 612
-    input_dim: int = 612
+    # Input - V2 landmarks with velocity/acceleration
+    # 180 dims (hands + body + face) × 3 (pos + vel + acc) = 540
+    input_dim: int = 540  # Updated to match new extraction pipeline
     
     # Encoder - INCREASED for better capacity
     d_model: int = 384  # Increased from 256 for better representation
