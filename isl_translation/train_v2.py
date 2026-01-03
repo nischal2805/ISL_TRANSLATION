@@ -481,7 +481,9 @@ def main():
         pad_id=model_config.pad_id,
         blank_id=model_config.blank_id,
         ctc_weight=model_config.ctc_weight,
-        label_smoothing=model_config.label_smoothing
+        label_smoothing=model_config.label_smoothing,
+        attn_reg_weight=0.1,  # Attention regularization
+        gate_reg_weight=0.2   # Gate regularization - CRITICAL for preventing mode collapse
     )
     
     # Create dataloaders

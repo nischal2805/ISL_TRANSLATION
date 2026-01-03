@@ -4,6 +4,7 @@ output_preprocessed/
 output_preprocessed_v2/
 preprocessed_v2/
 preprocessed_v2_fp16/
+video_features/
 
 # Model checkpoints
 checkpoints/

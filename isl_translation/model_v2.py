@@ -319,8 +319,8 @@ class TransformerDecoderLayer(nn.Module):
             nn.Linear(d_model * 2, d_model),
             nn.Sigmoid()
         )
-        # Initialize gate bias to +2.0 so sigmoid(2)=0.88 -> 88% encoder influence
-        nn.init.constant_(self.encoder_gate[0].bias, 2.0)
+        # Initialize gate bias to +3.0 so sigmoid(3)=0.95 -> 95% encoder influence
+        nn.init.constant_(self.encoder_gate[0].bias, 3.0)
         
         # Feed-forward
         self.ff_norm = nn.LayerNorm(d_model)
@@ -902,17 +902,17 @@ class HybridCTCAttentionLoss(nn.Module):
             
             attn_reg_loss = entropy + coverage_loss
         
-        # Gate regularization - penalize gates that are too low
+        # Gate regularization - STRONGLY penalize gates that are too low
         gate_reg_loss = torch.tensor(0.0, device=targets.device)
         if gate_values is not None and self.gate_reg_weight > 0:
-            # Penalize low gate values: loss = (1 - gate)^2
-            # This encourages gates to stay high (using encoder info)
+            # STRONG penalty for low gate values
+            # We want gates to stay high (using encoder info, not just language model)
             gate_penalties = []
             for gate in gate_values:
                 # gate shape: (B, L, d_model)
                 avg_gate = gate.mean()  # Average gate value
-                # Penalize if gate < 0.7 (want at least 70% encoder influence)
-                penalty = torch.relu(0.7 - avg_gate) ** 2
+                # STRONG penalty: cubic loss if gate < 0.85 (want at least 85% encoder influence)
+                penalty = torch.relu(0.85 - avg_gate) ** 3
                 gate_penalties.append(penalty)
             gate_reg_loss = sum(gate_penalties) / len(gate_penalties)
         
