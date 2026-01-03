@@ -170,7 +170,7 @@ if __name__ == "__main__":
     print(f"Decoded: '{decoded}'")
     
     # Test CTC decoding
-    ctc_output = [0, 12, 12, 12, 9, 0, 0, 16, 16, 16, 16, 0,12 20, 0]  # 'hello' with blanks/repeats
+    ctc_output = [0, 12, 12, 12, 9, 0, 0, 16, 16, 16, 16, 0, 12, 20, 0]
     ctc_decoded = vocab.ctc_decode(ctc_output)
     print(f"\nCTC output: {ctc_output}")
     print(f"CTC decoded: '{ctc_decoded}'")
