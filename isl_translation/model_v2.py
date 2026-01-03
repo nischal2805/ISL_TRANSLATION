@@ -203,6 +203,9 @@ class ConformerBlock(nn.Module):
     def __init__(self, d_model: int, num_heads: int, ff_dim: int, conv_kernel: int, dropout: float = 0.1):
         super().__init__()
         
+        # Debug: Check divisibility
+        assert d_model % num_heads == 0, f"d_model={d_model} must be divisible by num_heads={num_heads}"
+        
         self.ff1 = FeedForward(d_model, ff_dim, dropout)
         self.self_attn_norm = nn.LayerNorm(d_model)
         self.self_attn = nn.MultiheadAttention(d_model, num_heads, dropout=dropout, batch_first=True)
