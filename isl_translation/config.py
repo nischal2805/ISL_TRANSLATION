@@ -27,9 +27,9 @@ class DataConfig:
     test_dir: str = "/media/rvcse22/CSERV/kortex_sem5/ramita/outpu_final/test"
     
     # Data splits (70/15/15)
-    train_ratio: float = 0.70
-    val_ratio: float = 0.15
-    test_ratio: float = 0.15
+    train_ratio: float = 0.80
+    val_ratio: float = 0.10
+    test_ratio: float = 0.10
     
     # Max samples (None = use all, set by GPU mode)
     max_samples: Optional[int] = None
