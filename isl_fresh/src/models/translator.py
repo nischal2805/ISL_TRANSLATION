@@ -83,11 +83,13 @@ class ISLTranslator(nn.Module):
         return output
     
     @torch.no_grad()
-    def translate(self, video_frames, feature_lengths, max_len=100, bos_id=1, eos_id=2):
+    def translate(self, video_frames, feature_lengths, max_len=100, bos_id=1, eos_id=2,
+                  temperature=1.0, repetition_penalty=1.2):
         """Translate sign video to text tokens."""
         self.eval()
         encoder_out, enc_lengths = self.encoder(video_frames, feature_lengths)
-        return self.decoder.generate(encoder_out, enc_lengths, max_len, bos_id, eos_id)
+        return self.decoder.generate(encoder_out, enc_lengths, max_len, bos_id, eos_id,
+                                     temperature, repetition_penalty)
     
     def count_parameters(self):
         total = sum(p.numel() for p in self.parameters())

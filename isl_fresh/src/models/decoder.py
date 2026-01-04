@@ -77,16 +77,31 @@ class TextDecoder(nn.Module):
         return self.output(x)
     
     @torch.no_grad()
-    def generate(self, encoder_out, encoder_lengths, max_len=100, bos_id=1, eos_id=2):
-        """Greedy decoding."""
+    def generate(self, encoder_out, encoder_lengths, max_len=100, bos_id=1, eos_id=2, 
+                 temperature=1.0, repetition_penalty=1.2):
+        """Greedy decoding with repetition penalty."""
         B = encoder_out.size(0)
         device = encoder_out.device
         
         tokens = torch.full((B, 1), bos_id, dtype=torch.long, device=device)
         
-        for _ in range(max_len - 1):
+        for step in range(max_len - 1):
             logits = self.forward(tokens, encoder_out, encoder_lengths)
-            next_token = logits[:, -1].argmax(dim=-1, keepdim=True)
+            next_logits = logits[:, -1] / temperature  # (B, vocab)
+            
+            # Apply repetition penalty
+            if repetition_penalty != 1.0 and step > 0:
+                for b in range(B):
+                    for token_id in set(tokens[b].tolist()):
+                        if token_id in [bos_id, eos_id, 0]:  # Don't penalize special tokens
+                            continue
+                        # Penalize repeated tokens
+                        if next_logits[b, token_id] > 0:
+                            next_logits[b, token_id] /= repetition_penalty
+                        else:
+                            next_logits[b, token_id] *= repetition_penalty
+            
+            next_token = next_logits.argmax(dim=-1, keepdim=True)
             tokens = torch.cat([tokens, next_token], dim=1)
             
             if (next_token == eos_id).all():

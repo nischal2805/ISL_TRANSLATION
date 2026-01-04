@@ -310,8 +310,9 @@ class Trainer:
         feature_lengths = batch['feature_lengths'][:num_samples].to(self.device)
         texts = batch['texts'][:num_samples]
         
-        # Generate predictions using greedy decoding
-        output_ids = self.model.translate(features, feature_lengths, max_len=50)
+        # Generate predictions using greedy decoding with repetition penalty
+        output_ids = self.model.translate(features, feature_lengths, max_len=50, 
+                                         temperature=1.0, repetition_penalty=1.5)
         
         print("\n" + "="*70)
         print("🔮 SAMPLE PREDICTIONS")
