@@ -57,19 +57,19 @@ class SignEncoder(nn.Module):
         for p in self.videomae.parameters():
             p.requires_grad = False
         self._frozen = True
-        print("✓ VideoMAE encoder frozen")
+        print("[INFO] VideoMAE encoder frozen")
         
     def unfreeze(self):
         """Unfreeze for fine-tuning."""
         for p in self.videomae.parameters():
             p.requires_grad = True
         self._frozen = False
-        print("✓ VideoMAE encoder unfrozen for fine-tuning")
+        print("[INFO] VideoMAE encoder unfrozen for fine-tuning")
         
     def forward(self, video_frames, lengths=None):
         """
         Args:
-            video_frames: (B, num_frames, C, H, W) - preprocessed video frames
+            video_frames: (B, T, C, H, W) - preprocessed video frames from processor
             lengths: (B,) - actual number of valid frames (currently unused)
         Returns:
             encoder_out: (B, T_out, output_dim) - encoded features
@@ -78,9 +78,9 @@ class SignEncoder(nn.Module):
         B = video_frames.size(0)
         
         # VideoMAE forward pass
-        # Input: (B, num_frames, C, H, W)
+        # Input: (B, T, C, H, W) - processor format
         # Output: (B, seq_len, hidden_dim) where seq_len depends on patch size
-        outputs = self.videomae(video_frames)
+        outputs = self.videomae(pixel_values=video_frames)
         hidden_states = outputs.last_hidden_state  # (B, seq_len, 768)
         
         # Project to decoder dimension

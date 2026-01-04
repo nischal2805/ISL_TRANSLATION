@@ -20,6 +20,11 @@ from tqdm import tqdm
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
+try:
+    from hyperparameters import get_config, CosineWarmupRestartsScheduler
+except ImportError:
+    CosineWarmupRestartsScheduler = None
+
 from src.data.dataset import ISLDataset, collate_fn
 from src.models.translator import ISLTranslator
 from src.training.losses import HybridLoss
@@ -27,18 +32,25 @@ from src.training.metrics import TranslationMetrics, MetricsLogger, compute_topk
 
 
 class CosineWarmupScheduler(optim.lr_scheduler._LRScheduler):
-    """Warmup + Cosine decay scheduler."""
-    def __init__(self, optimizer, warmup_steps, total_steps, min_lr=1e-7, last_epoch=-1):
+    """Warmup + Cosine decay scheduler with configurable alpha."""
+    def __init__(self, optimizer, warmup_steps, total_steps, min_lr=1e-7, alpha=0.0, last_epoch=-1):
         self.warmup_steps = warmup_steps
         self.total_steps = total_steps
         self.min_lr = min_lr
+        self.alpha = alpha  # Fraction of max_lr at end (0.0 = decay to min_lr, 0.1 = decay to 10% of max_lr)
         super().__init__(optimizer, last_epoch)
     
     def get_lr(self):
         if self.last_epoch < self.warmup_steps:
+            # Linear warmup
             return [base_lr * self.last_epoch / max(1, self.warmup_steps) for base_lr in self.base_lrs]
+        # Cosine decay with alpha
         progress = (self.last_epoch - self.warmup_steps) / max(1, self.total_steps - self.warmup_steps)
-        return [self.min_lr + (base_lr - self.min_lr) * 0.5 * (1 + math.cos(math.pi * progress)) for base_lr in self.base_lrs]
+        cosine_factor = 0.5 * (1 + math.cos(math.pi * progress))
+        return [
+            self.min_lr + (base_lr - self.min_lr) * (self.alpha + (1 - self.alpha) * cosine_factor)
+            for base_lr in self.base_lrs
+        ]
 
 
 class Trainer:
@@ -58,21 +70,42 @@ class Trainer:
         decoder_params = list(model.decoder.parameters())
         ctc_params = list(model.ctc_head.parameters()) if hasattr(model, 'ctc_head') else []
         
+        # AdamW optimizer with proper beta configuration
+        beta1 = config.get('beta1', 0.9)
+        beta2 = config.get('beta2', 0.98)  # 0.98 better for transformers than 0.999
+        eps = config.get('adam_eps', 1e-8)
+        
         self.optimizer = optim.AdamW([
-            {'params': encoder_params, 'lr': config.get('encoder_lr', 1e-5)},
-            {'params': decoder_params + ctc_params, 'lr': config.get('decoder_lr', 3e-4)}
-        ], weight_decay=config.get('weight_decay', 0.01), betas=(0.9, 0.98))
+            {'params': encoder_params, 'lr': config.get('encoder_lr', 1e-5), 'weight_decay': config.get('weight_decay_encoder', 0.01)},
+            {'params': decoder_params + ctc_params, 'lr': config.get('decoder_lr', 3e-4), 'weight_decay': config.get('weight_decay_decoder', 0.01)}
+        ], betas=(beta1, beta2), eps=eps)
         
         # Calculate total steps for scheduler
         steps_per_epoch = len(train_loader) // config.get('gradient_accumulation', 1)
         total_steps = steps_per_epoch * config.get('num_epochs', 50)
         
-        self.scheduler = CosineWarmupScheduler(
-            self.optimizer, 
-            config.get('warmup_steps', 2000), 
-            total_steps,
-            min_lr=config.get('min_lr', 1e-7)
-        )
+        # LR Scheduler with alpha parameter for better decay control
+        scheduler_type = config.get('scheduler', 'cosine_warmup')
+        
+        if scheduler_type == 'cosine_warmup_restarts' and CosineWarmupRestartsScheduler:
+            self.scheduler = CosineWarmupRestartsScheduler(
+                self.optimizer,
+                warmup_steps=config.get('warmup_steps', 2000),
+                cycle_steps=config.get('cycle_steps', 5000),
+                min_lr=config.get('min_lr', 1e-7),
+                restart_mult=config.get('restart_mult', 2.0),
+                gamma=config.get('lr_decay_gamma', 0.95)
+            )
+            self.scheduler_type = 'restarts'
+        else:
+            self.scheduler = CosineWarmupScheduler(
+                self.optimizer, 
+                config.get('warmup_steps', 2000), 
+                total_steps,
+                min_lr=config.get('min_lr', 1e-7),
+                alpha=config.get('cosine_alpha', 0.0)
+            )
+            self.scheduler_type = 'standard'
         
         self.loss_fn = HybridLoss(
             model.vocab_size, 
@@ -135,12 +168,12 @@ class Trainer:
                 with autocast():
                     outputs = self.model(features, feature_lengths, targets, target_lengths)
                     losses = self.loss_fn(outputs, targets, target_lengths, outputs['encoder_lengths'])
-                    loss = losses['loss']
+                    loss = losses['loss'] / self.grad_accum  # Scale for gradient accumulation
                 self.scaler.scale(loss).backward()
             else:
                 outputs = self.model(features, feature_lengths, targets, target_lengths)
                 losses = self.loss_fn(outputs, targets, target_lengths, outputs['encoder_lengths'])
-                loss = losses['loss']
+                loss = losses['loss'] / self.grad_accum  # Scale for gradient accumulation
                 loss.backward()
             
             # Update metrics
@@ -164,7 +197,12 @@ class Trainer:
                 else:
                     self.optimizer.step()
                 
-                self.scheduler.step()
+                # Step scheduler based on type
+                if self.scheduler_type == 'restarts':
+                    self.scheduler.step()  # Custom step method
+                else:
+                    self.scheduler.step()  # PyTorch LR scheduler
+                
                 self.optimizer.zero_grad()
                 self.global_step += 1
                 
@@ -255,6 +293,11 @@ class Trainer:
         self.writer.add_scalar('val/bleu', metrics['bleu'], self.epoch)
         self.writer.add_scalar('val/top5_accuracy', metrics['top5_accuracy'], self.epoch)
         
+        return metrics
+    
+    @torch.no_grad()
+    def sample_predictions(self, num_samples: int = 5):
+        """Generate and display sample predictions."""
         self.model.eval()
         batch = next(iter(self.val_loader))
         
@@ -264,11 +307,6 @@ class Trainer:
         else:
             features = batch['features'][:num_samples].to(self.device)
         
-        feature_lengths = batch['feature_lengths'][:num_samples].to(self.device)
-        texts = batch['texts'][:num_samples]
-        batch = next(iter(self.val_loader))
-        
-        features = batch['features'][:num_samples].to(self.device)
         feature_lengths = batch['feature_lengths'][:num_samples].to(self.device)
         texts = batch['texts'][:num_samples]
         
@@ -389,14 +427,13 @@ class Trainer:
                 self.metrics_logger.plot_training_curves()
                 self.metrics_logger.save_metrics_csv()
             
-            # Early stopping - BREAK the loop!
+            # Early stopping
             if self.patience_counter >= self.patience:
                 print(f"\n⚠️ Early stopping triggered at epoch {epoch}!")
                 print(f"Best validation loss: {self.best_loss:.4f}")
                 print(f"Best BLEU score: {self.best_bleu:.2f}")
+                print(f"No improvement for {self.patience} epochs.")
                 break  # Exit training loop
-                print(f"   No improvement for {self.patience} epochs.")
-                break
         
         # Final summary
         print("\n" + "="*70)

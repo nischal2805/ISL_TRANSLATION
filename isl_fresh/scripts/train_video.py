@@ -15,15 +15,27 @@ from src.data.video_dataset import create_video_dataloaders
 from src.models.translator import ISLTranslator
 from src.training.trainer_v2 import Trainer
 from transformers import AutoTokenizer
+from hyperparameters import get_config
 
 
 def main():
     parser = argparse.ArgumentParser(description="Train ISL Translation with Video Frames")
     
-    # Data
-    parser.add_argument('--video-dir', type=str, default=r'E:\iSign-videos_v1.1',
+    # Hyperparameter preset
+    parser.add_argument('--preset', type=str, default='default', choices=['default', 'fast', 'production'],
+                        help='Hyperparameter preset (default/fast/production)')
+    
+    # Data - use config file or override
+    from config_production import get_paths
+    import platform
+    
+    # Auto-detect environment
+    is_linux = platform.system() == 'Linux'
+    default_paths = get_paths('gpu' if is_linux else 'local')
+    
+    parser.add_argument('--video-dir', type=str, default=default_paths['video_dir'],
                         help='Directory containing .mp4 video files')
-    parser.add_argument('--csv-path', type=str, default=r'E:\5thsem el\APPROACH 2\iSign_v1.1.csv',
+    parser.add_argument('--csv-path', type=str, default=default_paths['csv_path'],
                         help='CSV file with video metadata')
     
     # Model
@@ -70,6 +82,13 @@ def main():
     
     args = parser.parse_args()
     
+    # Load hyperparameter configuration
+    hp_config = get_config(args.preset)
+    
+    # Override with command line args where provided
+    if args.preset != 'default':
+        print(f"[INFO] Using {args.preset} hyperparameter preset")
+    
     # Print configuration
     print("="*70)
     print("VIDEO-BASED ISL TRANSLATION TRAINING")
@@ -100,48 +119,56 @@ def main():
         num_frames=args.num_frames
     )
     
-    print(f"✓ Train batches: {len(train_loader)}")
-    print(f"✓ Val batches: {len(val_loader)}")
-    print(f"✓ Test batches: {len(test_loader)}")
+    print(f"[INFO] Train batches: {len(train_loader)}")
+    print(f"[INFO] Val batches: {len(val_loader)}")
+    print(f"[INFO] Test batches: {len(test_loader)}")
     
     # Create model
     print("\nCreating VideoMAE-based model...")
     model = ISLTranslator(
-        hidden_dim=args.hidden_dim,
+        hidden_dim=hp_config.get('hidden_dim', args.hidden_dim),
         vocab_size=tokenizer.vocab_size,
-        decoder_layers=args.decoder_layers,
-        num_heads=4,
-        ff_dim=1024,
-        dropout=0.1,
+        decoder_layers=hp_config.get('decoder_layers', args.decoder_layers),
+        num_heads=hp_config.get('num_heads', 8),
+        ff_dim=hp_config.get('ff_dim', 1024),
+        dropout=hp_config.get('dropout', 0.1),
         pad_id=tokenizer.pad_token_id,
         use_ctc=True,
         pretrained=args.pretrained,
-        freeze_epochs=args.freeze_epochs,
+        freeze_epochs=hp_config.get('freeze_encoder_epochs', args.freeze_epochs),
         num_frames=args.num_frames
     )
     
     params = model.count_parameters()
-    print(f"✓ Total parameters: {params['total']:,} ({params['total']/1e6:.1f}M)")
-    print(f"✓ Trainable parameters: {params['trainable']:,} ({params['trainable']/1e6:.1f}M)")
-    print(f"✓ Encoder frozen: {model.encoder._frozen}")
+    print(f"[INFO] Total parameters: {params['total']:,} ({params['total']/1e6:.1f}M)")
+    print(f"[INFO] Trainable parameters: {params['trainable']:,} ({params['trainable']/1e6:.1f}M)")
+    print(f"[INFO] Encoder frozen: {model.encoder._frozen}")
     
-    # Training configuration
+    # Training configuration - merge hyperparameters with args
     config = {
         'device': 'cuda',
         'encoder_lr': args.encoder_lr,
         'decoder_lr': args.decoder_lr,
-        'warmup_steps': args.warmup_steps,
+        'warmup_steps': hp_config.get('warmup_steps', args.warmup_steps),
         'num_epochs': args.epochs,
         'gradient_accumulation': args.gradient_accumulation,
-        'ctc_weight': args.ctc_weight,
-        'patience': args.patience,
-        'use_amp': True,
+        'ctc_weight': hp_config.get('ctc_weight', args.ctc_weight),
+        'ce_weight': hp_config.get('ce_weight', 0.7),
+        'patience': hp_config.get('patience', args.patience),
+        'use_amp': hp_config.get('use_amp', True),
         'checkpoint_dir': args.checkpoint_dir,
         'log_dir': args.log_dir,
-        'max_grad_norm': 1.0,
-        'weight_decay': 0.01,
-        'label_smoothing': 0.1,
-        'min_lr': 1e-7,
+        'max_grad_norm': hp_config.get('max_grad_norm', 1.0),
+        'weight_decay': hp_config.get('weight_decay', 0.01),
+        'weight_decay_encoder': hp_config.get('weight_decay_encoder', 0.01),
+        'weight_decay_decoder': hp_config.get('weight_decay_decoder', 0.01),
+        'label_smoothing': hp_config.get('label_smoothing', 0.1),
+        'min_lr': hp_config.get('min_lr', 1e-7),
+        'beta1': hp_config.get('betas', (0.9, 0.98))[0],
+        'beta2': hp_config.get('betas', (0.9, 0.98))[1],
+        'adam_eps': hp_config.get('eps', 1e-8),
+        'cosine_alpha': hp_config.get('cosine_alpha', 0.0),
+        'scheduler': hp_config.get('scheduler', 'cosine_warmup'),
         'experiment_name': args.experiment_name
     }
     

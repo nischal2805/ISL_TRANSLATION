@@ -131,18 +131,37 @@ class ISLVideoDataset(Dataset):
         # Process frames using VideoMAE processor
         # Converts to tensor and normalizes
         pixel_values = self.processor(list(frames), return_tensors="pt")['pixel_values']
-        pixel_values = pixel_values.squeeze(0)  # Remove batch dim: (num_frames, 3, H, W)
+        pixel_values = pixel_values.squeeze(0)  # (T, C, H, W) - processor output format
         
         # Tokenize text
         text = row['text']
-        tokens = self.tokenizer.encode(text)
-        tokens = [self.tokenizer.bos_token_id] + tokens[:self.max_text_len-2] + [self.tokenizer.eos_token_id]
+        if pd.isna(text) or text is None or str(text).strip() == '':
+            text = 'unknown'  # Fallback for empty text
+        
+        try:
+            tokens = self.tokenizer.encode(str(text), add_special_tokens=False)
+            if tokens is None or len(tokens) == 0:
+                tokens = [100]  # [UNK] token ID for BERT
+        except Exception:
+            tokens = [100]  # [UNK] token ID for BERT
+        
+        # BERT token IDs: [CLS]=101, [SEP]=102, [PAD]=0, [UNK]=100
+        bos_id = 101 if self.tokenizer.bos_token_id is None else self.tokenizer.bos_token_id
+        eos_id = 102 if self.tokenizer.eos_token_id is None else self.tokenizer.eos_token_id
+        pad_id = 0 if self.tokenizer.pad_token_id is None else self.tokenizer.pad_token_id
+        
+        tokens = [bos_id] + tokens[:self.max_text_len-2] + [eos_id]
         text_len = len(tokens)
-        tokens = tokens + [self.tokenizer.pad_token_id] * (self.max_text_len - len(tokens))
+        tokens = tokens + [pad_id] * (self.max_text_len - len(tokens))
+        
+        # Ensure tokens is valid list of integers
+        if tokens is None or not isinstance(tokens, list):
+            tokens = [bos_id, eos_id] + [pad_id] * (self.max_text_len - 2)
+            text_len = 2
         
         return {
-            'video_frames': pixel_values,  # (num_frames, 3, H, W)
-            'feature_len': self.num_frames,  # All videos have same frame count
+            'video_frames': pixel_values,  # (T, C, H, W)
+            'feature_len': self.num_frames,
             'targets': torch.tensor(tokens, dtype=torch.long),
             'target_len': text_len,
             'text': text,
@@ -153,7 +172,7 @@ class ISLVideoDataset(Dataset):
 def collate_video_fn(batch):
     """Collate function for video batches."""
     return {
-        'video_frames': torch.stack([x['video_frames'] for x in batch]),  # (B, num_frames, 3, H, W)
+        'video_frames': torch.stack([x['video_frames'] for x in batch]),  # (B, T, C, H, W)
         'feature_lengths': torch.tensor([x['feature_len'] for x in batch]),
         'targets': torch.stack([x['targets'] for x in batch]),
         'target_lengths': torch.tensor([x['target_len'] for x in batch]),

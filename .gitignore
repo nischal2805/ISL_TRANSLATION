@@ -11,6 +11,7 @@ isl_fresh/data/
 logs/
 logs_v2/
 logs_fresh/
+logs_video/
 
 # Model checkpoints
 checkpoints/

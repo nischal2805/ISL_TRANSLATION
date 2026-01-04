@@ -57,7 +57,7 @@ class ISLTranslator(nn.Module):
     def forward(self, video_frames, feature_lengths, targets, target_lengths):
         """
         Args:
-            video_frames: (B, num_frames, 3, H, W) - actual video frames
+            video_frames: (B, T, C, H, W) - video frames from processor
             feature_lengths: (B,) - frame counts (all same for VideoMAE)
             targets: (B, T_out) - target tokens
             target_lengths: (B,) - target lengths
@@ -98,7 +98,7 @@ class ISLTranslator(nn.Module):
         """Unfreeze encoder after warmup epochs."""
         if epoch >= self.freeze_epochs and self.encoder._frozen:
             self.encoder.unfreeze()
-            print(f"✓ Epoch {epoch}: Encoder unfrozen for fine-tuning")
+            print(f"[INFO] Epoch {epoch}: Encoder unfrozen for fine-tuning")
 
 
 def create_model(config=None):

@@ -17,10 +17,10 @@ import cv2
 os.environ['MEDIAPIPE_DISABLE_GPU'] = '0'  # Enable GPU
 import mediapipe as mp
 
-# Configuration - adjust paths for your Linux machine
-VIDEO_DIR = "/media/rvcse22/CSERV/kortex_sem5/videos/iSign-videos_v1.1"  # UPDATE THIS
-CSV_PATH = "/media/rvcse22/CSERV/kortex_sem5/nischal/training_by_surya/ISL_TRANSLATION/iSign_v1.1.csv"       # UPDATE THIS  
-OUTPUT_DIR = "/media/rvcse22/CSERV/kortex_sem5/nischal/training_by_surya/data"        # UPDATE THIS
+# Configuration - GPU Server paths
+VIDEO_DIR = "/media/rvcse22/CSERV/kortex_sem5/videos/iSign-videos_v1.1"
+CSV_PATH = "/media/rvcse22/CSERV/kortex_sem5/nischal/training_by_surya/ISL_TRANSLATION/iSign_v1.1.csv"
+OUTPUT_DIR = "/media/rvcse22/CSERV/kortex_sem5/nischal/training_by_surya/isl_fresh/data"
 
 MAX_FRAMES = 200          # Frames per video
 FRAME_SKIP = 2            # Process every 2nd frame (still good quality)
