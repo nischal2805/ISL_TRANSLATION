@@ -220,6 +220,10 @@ class NaNSafeHybridLoss(nn.Module):
                 # Average over valid samples only
                 if valid_ctc_mask.sum() > 0:
                     ctc_l = per_sample_ctc.sum() / valid_ctc_mask.sum().clamp(min=1)
+                    
+                    # CLAMP CTC loss to prevent explosion (max=50.0)
+                    ctc_l = ctc_l.clamp(max=50.0)
+                    
                     ctc_valid = torch.isfinite(ctc_l).item()
                 
             except RuntimeError as e:
@@ -432,23 +436,29 @@ class NaNSafeTrainer:
         # Mixed precision
         self.scaler = GradScaler(enabled=training_config.use_amp)
         
-        # Scheduled values - Use config values
+        # Scheduled values - Epoch-based decay as specified
+        # CTC weight: 0.2 -> 0.1 over 30 epochs
+        ctc_decay_steps = len(train_loader) * training_config.ctc_decay_epochs
         self.ctc_weight_scheduler = ScheduledValue(
-            start=training_config.ctc_weight_start,  # Start high (0.3) for alignment
-            end=training_config.ctc_weight_end,      # Decay to 0.1
-            num_steps=total_steps
+            start=training_config.ctc_weight_start,  # 0.2 for stable alignment
+            end=training_config.ctc_weight_end,      # 0.1 to let attention dominate
+            num_steps=ctc_decay_steps
         )
         
+        # Teacher forcing: 0.9 -> 0.0 over 18 epochs (30% of 60)
+        # AGGRESSIVE decay forces decoder to rely on encoder context
+        tf_decay_steps = len(train_loader) * training_config.tf_decay_epochs
         self.tf_ratio_scheduler = ScheduledValue(
-            start=training_config.tf_ratio_start,  # Full teacher forcing (1.0)
-            end=training_config.tf_ratio_end,      # End at 0.5
-            num_steps=total_steps
+            start=training_config.tf_ratio_start,  # 0.9 (start slightly lower)
+            end=training_config.tf_ratio_end,      # 0.0 (full autoregressive)
+            num_steps=tf_decay_steps
         )
         
-        # Early stopping
+        # Early stopping - disabled until min_epochs
         self.early_stopping = EarlyStopping(
             patience=training_config.early_stopping_patience
         )
+        self.min_epochs_before_stopping = getattr(training_config, 'min_epochs_before_stopping', 30)
         
         # Training state
         self.global_step = 0
@@ -476,6 +486,11 @@ class NaNSafeTrainer:
         pbar = tqdm(self.train_loader, desc=f"Epoch {epoch}")
         
         for batch_idx, batch in enumerate(pbar):
+            # Skip None batches (from filtered collate_fn with invalid samples)
+            if batch is None:
+                skipped_batches += 1
+                continue
+            
             self.total_batches += 1
             
             # ============================================================
@@ -749,10 +764,13 @@ class NaNSafeTrainer:
         self.logger.info(f"Starting training for {num_epochs} epochs")
         self.logger.info(f"Device: {self.device}")
         self.logger.info(f"Model parameters: {sum(p.numel() for p in self.model.parameters()):,}")
-        self.logger.info(f"CTC weight: {training_config.ctc_weight_start} -> {training_config.ctc_weight_end}")
-        self.logger.info(f"Label smoothing: {training_config.label_smoothing}")
         self.logger.info(f"Learning rate: {training_config.learning_rate}")
-        self.logger.info(f"Early stopping based on: WER (lower is better)")
+        self.logger.info(f"CTC weight: {training_config.ctc_weight_start} -> {training_config.ctc_weight_end} over {training_config.ctc_decay_epochs} epochs")
+        self.logger.info(f"Teacher forcing: {training_config.tf_ratio_start} -> {training_config.tf_ratio_end} over {training_config.tf_decay_epochs} epochs")
+        self.logger.info(f"Label smoothing: {training_config.label_smoothing}")
+        self.logger.info(f"Token dropout: 5% (decoder input regularization)")
+        self.logger.info(f"Repetition penalty: 1.2 (inference only)")
+        self.logger.info(f"Early stopping: disabled until epoch {self.min_epochs_before_stopping}, then patience={training_config.patience}")
         
         for epoch in range(start_epoch, num_epochs):
             epoch_start = time.time()
@@ -821,10 +839,15 @@ class NaNSafeTrainer:
             
             # ================================================================
             # EARLY STOPPING BASED ON WER (not loss!)
+            # Only enabled after min_epochs to let model learn attention first
             # ================================================================
-            if self.early_stopping(val_losses['wer']):
-                self.logger.info(f"Early stopping triggered at epoch {epoch + 1} (WER not improving)")
-                break
+            if epoch + 1 >= self.min_epochs_before_stopping:
+                if self.early_stopping(val_losses['wer']):
+                    self.logger.info(f"Early stopping triggered at epoch {epoch + 1} (WER not improving)")
+                    break
+            else:
+                # Reset counter during warmup period
+                self.early_stopping.counter = 0
         
         # Save LAST model after training completion
         last_path = os.path.join(self.checkpoint_dir, 'last_model.pt')
@@ -887,6 +910,9 @@ def main():
     # Load vocabulary
     vocab = Vocabulary()
     print(f"Vocabulary size: {vocab.size}")
+    
+    # IMPORTANT: Update model_config with actual vocab size
+    model_config.vocab_size = vocab.size
     
     # Create dataloaders
     metadata_path = os.path.join(data_config.processed_dir, 'metadata.csv')

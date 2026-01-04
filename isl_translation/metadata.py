@@ -9,11 +9,11 @@ This script will:
 """
 
 import os
-import sys
 import numpy as np
 import pandas as pd
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Optional
+from tqdm import tqdm
 
 
 def generate_metadata(
@@ -21,55 +21,55 @@ def generate_metadata(
     annotations_file: str,
     output_path: Optional[str] = None
 ) -> pd.DataFrame:
-    """
-    Generate metadata.csv from preprocessed .npy files and annotations.
-    
-    Args:
-        preprocessed_dir: Root directory containing preprocessed .npy files
-                         Can have subdirectories like train/, val/, test/
-                         Or all files in one directory
-        annotations_file: Path to iSign_v1.1.csv with 'uid' and 'text' columns
-        output_path: Where to save metadata.csv (default: preprocessed_dir/metadata.csv)
-    
-    Returns:
-        DataFrame with metadata
-    """
     print("=" * 60)
     print("Generating metadata.csv")
     print("=" * 60)
-    
+
+    # ------------------------------------------------------------
     # Load annotations
+    # ------------------------------------------------------------
     print(f"\nLoading annotations from: {annotations_file}")
     annotations = pd.read_csv(annotations_file)
-    
-    # Check for uid or video_id column
+
+    # Ensure required column exists
+    if 'text' not in annotations.columns:
+        raise ValueError("Annotations file must contain a 'text' column")
+
+    # Find ID column
     id_column = None
     for col in ['uid', 'video_id', 'id', 'filename']:
         if col in annotations.columns:
             id_column = col
             break
-    
+
     if id_column is None:
-        print("ERROR: Could not find video ID column in annotations.")
-        print(f"Available columns: {list(annotations.columns)}")
-        return None
-    
+        raise ValueError(
+            f"Could not find ID column in annotations. "
+            f"Available columns: {list(annotations.columns)}"
+        )
+
     print(f"Using '{id_column}' as video ID column")
     print(f"Total annotations: {len(annotations)}")
-    
-    # Create lookup dictionary: video_id -> text
-    id_to_text = dict(zip(annotations[id_column].astype(str), annotations['text']))
-    
-    # Find all .npy files
+
+    # Create lookup: video_id -> cleaned text
+    id_to_text = {
+        str(row[id_column]): str(row['text']).strip()
+        for _, row in annotations.iterrows()
+        if pd.notna(row['text'])
+    }
+    print(f"Valid annotations (non-empty text): {len(id_to_text)}")
+
+    # ------------------------------------------------------------
+    # Scan for .npy files
+    # ------------------------------------------------------------
     print(f"\nScanning for .npy files in: {preprocessed_dir}")
-    
-    npy_files = []
+
     preprocessed_path = Path(preprocessed_dir)
-    
-    # Check for split subdirectories
+    npy_files = []
+
     split_dirs = ['train', 'val', 'test']
     has_split_dirs = any((preprocessed_path / split).exists() for split in split_dirs)
-    
+
     if has_split_dirs:
         print("Found split directories (train/val/test)")
         for split in split_dirs:
@@ -79,135 +79,148 @@ def generate_metadata(
                     npy_files.append((npy_file, split))
     else:
         print("No split directories found, will assign splits automatically")
-        for npy_file in preprocessed_path.rglob("*.npy"):
+        for npy_file in preprocessed_path.glob("*.npy"):  # Use glob instead of rglob
             npy_files.append((npy_file, None))
-    
+
     print(f"Found {len(npy_files)} .npy files")
-    
+
     if len(npy_files) == 0:
-        print("ERROR: No .npy files found!")
-        return None
-    
-    # Process each file
-    metadata_list = []
+        raise RuntimeError("No .npy files found in preprocessed directory")
+
+    # ------------------------------------------------------------
+    # Build metadata
+    # ------------------------------------------------------------
+    metadata = []
     missing_text = 0
-    
-    for npy_path, split in npy_files:
-        # Extract video_id from filename
-        # Filename format: _z80Fp9SjhE--6.npy -> video_id is _z80Fp9SjhE
+    load_errors = 0
+
+    print("\nProcessing files...")
+    for npy_path, split in tqdm(npy_files, desc="Building metadata"):
         filename_stem = npy_path.stem
+
+        # Handle filenames like: _z80Fp9SjhE--6.npy or 1782bea75c7d-1.npy
         if '--' in filename_stem:
             video_id = filename_stem.rsplit('--', 1)[0]
+        elif '-' in filename_stem:
+            # For format like 1782bea75c7d-1, keep the full name as video_id
+            video_id = filename_stem
         else:
             video_id = filename_stem
-        
-        # Get text from annotations
-        text = id_to_text.get(video_id, None)
-        
+
+        text = id_to_text.get(video_id)
+
         if text is None:
             missing_text += 1
             continue
-        
-        # Get feature length
+
         try:
-            features = np.load(str(npy_path))
-            length = features.shape[0]
+            features = np.load(npy_path)
+            length = int(features.shape[0])
         except Exception as e:
-            print(f"Error loading {npy_path}: {e}")
+            load_errors += 1
             continue
-        
-        metadata_list.append({
-            'video_id': video_id,
-            'text': text,
-            'split': split,  # May be None if no split dirs
-            'length': length,
-            'path': str(npy_path)
+
+        metadata.append({
+            "video_id": video_id,
+            "text": text,
+            "split": split,
+            "length": length,
+            "path": str(npy_path)
         })
-    
-    print(f"\nMatched {len(metadata_list)} files with annotations")
+
+    print(f"\nMatched {len(metadata)} files with annotations")
     if missing_text > 0:
-        print(f"Warning: {missing_text} files had no matching annotation")
-    
-    # Create DataFrame
-    metadata_df = pd.DataFrame(metadata_list)
-    
-    # Assign splits if not already assigned
+        print(f"WARNING: {missing_text} files had no matching annotation")
+    if load_errors > 0:
+        print(f"WARNING: {load_errors} files failed to load")
+
+    if len(metadata) == 0:
+        raise RuntimeError("No files matched with annotations! Check your file naming.")
+
+    metadata_df = pd.DataFrame(metadata)
+
+    # ------------------------------------------------------------
+    # Assign splits if needed
+    # ------------------------------------------------------------
     if not has_split_dirs or metadata_df['split'].isna().any():
-        print("\nAssigning train/val/test splits (70/15/15)...")
-        n_total = len(metadata_df)
-        n_train = int(n_total * 0.70)
-        n_val = int(n_total * 0.15)
-        
-        # Shuffle
+        print("\nAssigning train/val/test splits (80/10/10)...")
+
         metadata_df = metadata_df.sample(frac=1, random_state=42).reset_index(drop=True)
-        
-        # Assign splits
-        metadata_df.loc[:n_train-1, 'split'] = 'train'
-        metadata_df.loc[n_train:n_train+n_val-1, 'split'] = 'val'
-        metadata_df.loc[n_train+n_val:, 'split'] = 'test'
+
+        n_total = len(metadata_df)
+        n_train = int(0.80 * n_total)
+        n_val = int(0.10 * n_total)
+
+        metadata_df.loc[:n_train - 1, 'split'] = 'train'
+        metadata_df.loc[n_train:n_train + n_val - 1, 'split'] = 'val'
+        metadata_df.loc[n_train + n_val:, 'split'] = 'test'
+
+    # ------------------------------------------------------------
+    # Print total number of rows in metadata
+    # ------------------------------------------------------------
+    total_rows = len(metadata_df)
+    print(f"\nTotal rows in metadata.csv: {total_rows}")
+
     
+    # ------------------------------------------------------------
+    # Sort for reproducibility
+    # ------------------------------------------------------------
+    metadata_df = metadata_df.sort_values(
+        by=['split', 'video_id']
+    ).reset_index(drop=True)
+
+    # ------------------------------------------------------------
     # Print statistics
+    # ------------------------------------------------------------
     print("\n" + "=" * 40)
     print("Dataset Statistics:")
     print("=" * 40)
     for split in ['train', 'val', 'test']:
-        count = len(metadata_df[metadata_df['split'] == split])
-        print(f"  {split}: {count} samples")
-    print(f"  Total: {len(metadata_df)} samples")
+        count = (metadata_df['split'] == split).sum()
+        print(f"  {split}: {count}")
+    print(f"  Total: {len(metadata_df)}")
     
+    # Text length stats
+    text_lengths = metadata_df['text'].str.len()
+    print(f"\nText length: min={text_lengths.min()}, max={text_lengths.max()}, avg={text_lengths.mean():.1f}")
+    
+    # Sequence length stats
+    print(f"Seq length: min={metadata_df['length'].min()}, max={metadata_df['length'].max()}, avg={metadata_df['length'].mean():.1f}")
+
+    # ------------------------------------------------------------
     # Save metadata
+    # ------------------------------------------------------------
     if output_path is None:
-        output_path = os.path.join(preprocessed_dir, 'metadata.csv')
-    
+        output_path = os.path.join(preprocessed_dir, "metadata.csv")
+
     metadata_df.to_csv(output_path, index=False)
     print(f"\nMetadata saved to: {output_path}")
-    
+
     return metadata_df
 
 
 def main():
-    """Main entry point with example usage."""
-    
-    # ============================================================
-    # GPU SERVER PATHS
-    # ============================================================
-    
-    # Path to your preprocessed .npy files
     PREPROCESSED_DIR = "/media/rvcse22/CSERV/kortex_sem5/ramita/outpu_final"
-    
-    # Path to your annotations CSV (iSign_v1.1.csv)
     ANNOTATIONS_FILE = "/media/rvcse22/CSERV/kortex_sem5/ramita/iSign_v1.1.csv"
-    
-    # Where to save metadata.csv (default: inside PREPROCESSED_DIR)
-    OUTPUT_PATH = None  # Will save as PREPROCESSED_DIR/metadata.csv
-    
-    # ============================================================
-    
-    # Check if paths exist
+    OUTPUT_PATH = None
+
     if not os.path.exists(PREPROCESSED_DIR):
-        print(f"ERROR: Preprocessed directory not found: {PREPROCESSED_DIR}")
-        print("\nPlease update the paths in this script:")
-        print("  PREPROCESSED_DIR = path to your .npy files")
-        print("  ANNOTATIONS_FILE = path to iSign_v1.1.csv")
-        return
-    
+        raise FileNotFoundError(f"Preprocessed directory not found: {PREPROCESSED_DIR}")
+
     if not os.path.exists(ANNOTATIONS_FILE):
-        print(f"ERROR: Annotations file not found: {ANNOTATIONS_FILE}")
-        return
-    
-    # Generate metadata
-    metadata = generate_metadata(
+        raise FileNotFoundError(f"Annotations file not found: {ANNOTATIONS_FILE}")
+
+    generate_metadata(
         preprocessed_dir=PREPROCESSED_DIR,
         annotations_file=ANNOTATIONS_FILE,
         output_path=OUTPUT_PATH
     )
-    
-    if metadata is not None:
-        print("\n" + "=" * 60)
-        print("SUCCESS! metadata.csv generated.")
-        print("You can now run training with:")
-        print("  python run_training.py")
-        print("=" * 60)
+
+    print("\n" + "=" * 60)
+    print("SUCCESS! metadata.csv generated.")
+    print("You can now start training with:")
+    print("  python train.py --gpu-mode large")
+    print("=" * 60)
 
 
 if __name__ == "__main__":

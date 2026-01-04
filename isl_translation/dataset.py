@@ -75,8 +75,14 @@ class ISLDataset(Dataset):
         if features.shape[0] > self.max_src_len:
             features = features[:self.max_src_len]
         
-        # Encode text with SOS/EOS tokens for proper sequence learning
+        # Get text and handle NaN/None values
         text = row['text']
+        if pd.isna(text) or text is None:
+            text = ""
+        else:
+            text = str(text)
+        
+        # Encode text with SOS/EOS tokens for proper sequence learning
         target_ids = self.vocab.encode(text, add_sos=True, add_eos=True)
         
         # Truncate target if needed (preserve SOS at start, add EOS at end)
@@ -91,7 +97,7 @@ class ISLDataset(Dataset):
         }
 
 
-def collate_fn(batch: List[Dict]) -> Dict[str, torch.Tensor]:
+def collate_fn(batch: List[Dict]) -> Optional[Dict[str, torch.Tensor]]:
     """
     Collate function for DataLoader.
     
@@ -108,7 +114,15 @@ def collate_fn(batch: List[Dict]) -> Dict[str, torch.Tensor]:
             - target_lengths: (B,) - actual lengths before padding
             - texts: List of original texts
             - video_ids: List of video identifiers
+        Returns None if all samples are invalid.
     """
+    # Filter out samples with empty targets or features
+    batch = [b for b in batch if b['target_ids'].shape[0] > 0 and b['features'].shape[0] > 0]
+    
+    # Return None if all samples are invalid
+    if len(batch) == 0:
+        return None
+    
     # Get batch size
     batch_size = len(batch)
     

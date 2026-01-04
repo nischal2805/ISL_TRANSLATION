@@ -170,6 +170,13 @@ class MultiHeadSelfAttention(nn.Module):
     def __init__(self, d_model: int, num_heads: int = 4, dropout: float = 0.1):
         super().__init__()
         
+        # Ensure d_model is divisible by num_heads
+        if d_model % num_heads != 0:
+            # Adjust num_heads to a valid divisor
+            valid_heads = [h for h in [8, 6, 4, 2, 1] if d_model % h == 0]
+            num_heads = valid_heads[0] if valid_heads else 1
+            print(f"Warning: Adjusted num_heads to {num_heads} for d_model={d_model}")
+        
         self.d_model = d_model
         self.num_heads = num_heads
         self.layer_norm = nn.LayerNorm(d_model)
@@ -591,6 +598,11 @@ class GRUDecoder(nn.Module):
         self.embed_scale = math.sqrt(d_model)
         self.embed_dropout = nn.Dropout(dropout)
         
+        # Token dropout: 5% of input tokens randomly replaced with <unk>
+        # Prevents shortcut learning by forcing decoder to rely on encoder context
+        self.token_dropout_rate = 0.05
+        self.unk_id = 3  # <unk> token ID
+        
         # Pre-net: 2-layer MLP before GRU (helps with attention alignment)
         self.prenet = nn.Sequential(
             nn.Linear(d_model, d_model),
@@ -657,6 +669,12 @@ class GRUDecoder(nn.Module):
         input_token = targets[:, 0].unsqueeze(1)  # (B, 1)
         
         for t in range(max_len):
+            # Apply token dropout during training (5% tokens replaced with <unk>)
+            # This regularization forces decoder to rely on encoder context
+            if self.training and self.token_dropout_rate > 0:
+                dropout_mask = torch.rand_like(input_token.float()) < self.token_dropout_rate
+                input_token = torch.where(dropout_mask, torch.full_like(input_token, self.unk_id), input_token)
+            
             # Embed input token with scaling
             embedded = self.embedding(input_token) * self.embed_scale  # (B, 1, d_model)
             embedded = self.embed_dropout(embedded)
@@ -703,9 +721,16 @@ class GRUDecoder(nn.Module):
         encoder_mask: Optional[torch.Tensor] = None,
         max_len: int = 100,
         sos_id: int = 1,
-        eos_id: int = 2
+        eos_id: int = 2,
+        repetition_penalty: float = 2.0,
+        repetition_window: int = 5
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Greedy decoding for inference."""
+        """Greedy decoding for inference with soft repetition penalty.
+        
+        Args:
+            repetition_penalty: Penalty scale for repeating tokens (>1.0 discourages repetition)
+            repetition_window: Only penalize tokens within last N tokens (soft window)
+        """
         batch_size = encoder_output.size(0)
         device = encoder_output.device
         
@@ -744,6 +769,21 @@ class GRUDecoder(nn.Module):
             combined = torch.cat([gru_out, context], dim=-1)
             combined = self.pre_output_norm(combined)
             logits = self.output_proj(combined).squeeze(1)  # (B, vocab_size)
+            
+            # Apply SOFT repetition penalty with window
+            # Only penalize tokens that appeared in the last `repetition_window` positions
+            if t > 0 and repetition_penalty != 1.0:
+                window_start = max(0, t - repetition_window)
+                for b in range(batch_size):
+                    # Get tokens within the window only (soft penalty)
+                    recent_tokens = output_ids[b, window_start:t].tolist()
+                    for token_id in set(recent_tokens):
+                        if token_id > 0:  # Don't penalize padding/special tokens
+                            # Soft penalty: divide positive logits, multiply negative
+                            if logits[b, token_id] > 0:
+                                logits[b, token_id] = logits[b, token_id] / repetition_penalty
+                            else:
+                                logits[b, token_id] = logits[b, token_id] * repetition_penalty
             
             probs = F.softmax(logits, dim=-1)
             next_token = probs.argmax(dim=-1)  # (B,)
@@ -886,7 +926,9 @@ class ISLTranslationModel(nn.Module):
         max_len: int = 100,
         use_ctc: bool = False,
         beam_width: int = 1,
-        length_penalty: float = 0.6
+        length_penalty: float = 0.6,
+        repetition_penalty: float = 2.0,
+        repetition_window: int = 5
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Inference decoding.
@@ -898,6 +940,8 @@ class ISLTranslationModel(nn.Module):
             use_ctc: If True, use CTC decoding; otherwise GRU decoder
             beam_width: Beam width for beam search (1 = greedy)
             length_penalty: Length normalization for beam search
+            repetition_penalty: Soft penalty for repeating tokens (>1.0 discourages loops)
+            repetition_window: Only penalize tokens within last N positions
             
         Returns:
             output_ids: (B, L) decoded token IDs
@@ -931,11 +975,13 @@ class ISLTranslationModel(nn.Module):
                 length_penalty=length_penalty
             )
         else:
-            # Greedy decoding
+            # Greedy decoding with soft repetition penalty
             return self.decoder.decode_greedy(
                 encoder_output, encoder_mask, max_len,
                 sos_id=vocab_config.sos_id,
-                eos_id=vocab_config.eos_id
+                eos_id=vocab_config.eos_id,
+                repetition_penalty=repetition_penalty,
+                repetition_window=repetition_window
             )
     
     def count_parameters(self) -> int:
@@ -948,10 +994,22 @@ def create_model(config=None) -> ISLTranslationModel:
     if config is None:
         from config import model_config as config
     
+    vocab_size = config.vocab_size
+    
+    # SAFETY CHECK: Ensure vocab_size is valid
+    if vocab_size is None or vocab_size <= 0:
+        print(f"WARNING: Invalid vocab_size={vocab_size}, attempting to load from Vocabulary")
+        from vocab import Vocabulary
+        temp_vocab = Vocabulary()
+        vocab_size = temp_vocab.size
+        print(f"Using vocab_size={vocab_size} from Vocabulary")
+    
+    print(f"Creating model with vocab_size={vocab_size}, d_model={config.d_model}, num_heads={config.num_heads}")
+    
     model = ISLTranslationModel(
         input_dim=config.input_dim,
         d_model=config.d_model,
-        vocab_size=config.vocab_size,
+        vocab_size=vocab_size,
         num_cnn_blocks=config.num_cnn_blocks,
         num_conformer_blocks=config.num_conformer_blocks,
         num_decoder_layers=config.num_decoder_layers,

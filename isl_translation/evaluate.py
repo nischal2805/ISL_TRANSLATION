@@ -170,6 +170,9 @@ def compute_bleu(predictions: List[str], targets: List[str], max_n: int = 4) -> 
         BLEU score (0.0 to 1.0)
     """
     def get_ngrams(text: str, n: int) -> Counter:
+        # Handle non-string inputs (e.g., NaN values)
+        if not isinstance(text, str):
+            text = str(text) if text is not None else ""
         words = text.lower().strip().split()
         return Counter([tuple(words[i:i+n]) for i in range(len(words) - n + 1)])
     

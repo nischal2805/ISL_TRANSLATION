@@ -75,11 +75,11 @@ class LandmarkConfig:
 class ModelConfig:
     """Model architecture configuration."""
     # Input/Output dimensions
-    input_dim: int = 138      # 46 landmarks * 3 coords (your actual data dimension)
-    d_model: int = 384        # Increased model dimension for more capacity
-    hidden_dim: int = 384     # Main hidden dimension (same as d_model)
-    embedding_dim: int = 384  # Decoder embedding dimension
-    vocab_size: int = 35      # CORRECTED: 5 special + 26 letters + 4 punctuation
+    input_dim: int = 414      # 46 landmarks * 3 coords (position only)
+    d_model: int = 384        # Model dimension (used by create_model)
+    hidden_dim: int = 256     # Main hidden dimension (same as d_model)
+    embedding_dim: int = 256  # Decoder embedding dimension
+    vocab_size: int = 35000   # Set to accommodate actual vocab (34054 tokens)
     
     # Encoder - Increased capacity
     num_cnn_blocks: int = 3   # More CNN blocks for local feature extraction
@@ -146,18 +146,20 @@ class TrainingConfig:
     
     # Loss weights - CTC is only for alignment, attention decoder drives WER
     # IMPORTANT: CTC produces blank-heavy sequences that inflate WER, so keep weight low
-    ctc_weight_start: float = 0.1  # Low weight - CTC is auxiliary for alignment only
-    ctc_weight_end: float = 0.05   # Decay to near-zero to let attention dominate
-    ctc_decay_epochs: int = 10     # Drop CTC quickly after warm-up
-    label_smoothing: float = 0.1   # Increased for better regularization
+    ctc_weight_start: float = 0.15  # Moderate CTC for alignment
+    ctc_weight_end: float = 0.1     # Decay to 0.1 to let attention dominate
+    ctc_decay_epochs: int = 30      # Decay over 30 epochs
+    label_smoothing: float = 0.1    # Increased for better regularization
+    ctc_loss_clamp: float = 50.0    # Clamp CTC loss to prevent explosion
     
-    # Teacher forcing - slower decay for better learning
-    tf_ratio_start: float = 1.0   # Full teacher forcing initially
-    tf_ratio_end: float = 0.5     # Keep 50% at end for stability
-    tf_decay_epochs: int = 40     # Slower decay
+    # Teacher forcing - AGGRESSIVE decay to force autoregressive learning
+    # This prevents mode collapse by forcing decoder to rely on encoder
+    tf_ratio_start: float = 0.9   # Start at 90% (not 100%)
+    tf_ratio_end: float = 0.0     # Decay to 0% (full autoregressive)
+    tf_decay_epochs: int = 18     # Fast decay over ~30% of 60 epochs
     
     # Gradient clipping
-    max_grad_norm: float = 0.5    # Tighter clipping for CTC stability
+    max_grad_norm: float = 1.0    # Gradient clipping before optimizer.step()
     
     # Mixed precision
     use_amp: bool = True
@@ -165,9 +167,10 @@ class TrainingConfig:
     # Gradient checkpointing (saves memory)
     use_gradient_checkpointing: bool = True
     
-    # Early stopping
+    # Early stopping - disabled until epoch 30 to let model learn attention
     patience: int = 25            # More patience for exploration
     min_delta: float = 0.0001     # More sensitive improvement detection
+    min_epochs_before_stopping: int = 30  # Don't stop before epoch 30 (WER unreliable early)
     
     # Checkpointing - GPU SERVER PATH
     checkpoint_dir: str = "/media/rvcse22/CSERV/kortex_sem5/ramita/checkpoints"
@@ -238,34 +241,25 @@ class TrainingConfig:
 
 @dataclass
 class VocabConfig:
-    """Vocabulary configuration."""
+    """Vocabulary configuration - Word-level vocabulary."""
     # Special tokens
     pad_token: str = "<pad>"
     sos_token: str = "<sos>"
     eos_token: str = "<eos>"
     unk_token: str = "<unk>"
-    space_token: str = " "
     
     # Token IDs
     pad_id: int = 0   # Also CTC blank
     sos_id: int = 1
     eos_id: int = 2
     unk_id: int = 3
-    space_id: int = 4
     
-    # Characters (a-z: 5-30)
-    char_offset: int = 5
+    # Words start from index 4
+    word_offset: int = 4
     
-    # Punctuation (31-34)
-    punct_map: dict = field(default_factory=lambda: {
-        '.': 31,
-        ',': 32,
-        '!': 33,
-        '?': 34
-    })
-    
-    # Total vocab size
-    vocab_size: int = 35
+    # Vocab size is set dynamically by Vocabulary class after loading CSV
+    # This is just a placeholder - actual size depends on dataset
+    vocab_size: int = 0  # Will be updated dynamically
 
 
 @dataclass 
