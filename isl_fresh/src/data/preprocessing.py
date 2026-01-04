@@ -58,7 +58,7 @@ def normalize_landmarks(
     return normalized, stats
 
 
-def center_pose(landmarks: np.ndarray, shoulder_indices: Tuple[int, int] = (3, 6)) -> np.ndarray:
+def center_pose(landmarks: np.ndarray, shoulder_indices: Tuple[int, int] = (11, 12)) -> np.ndarray:
     """
     Center landmarks relative to shoulder midpoint.
     
@@ -67,7 +67,7 @@ def center_pose(landmarks: np.ndarray, shoulder_indices: Tuple[int, int] = (3, 6
     
     Args:
         landmarks: Shape (seq_len, feature_dim)
-        shoulder_indices: Indices of left and right shoulder (in x,y,z triplets)
+        shoulder_indices: Indices of left and right shoulder landmark points (11=left, 12=right for pose)
     
     Returns:
         Centered landmarks

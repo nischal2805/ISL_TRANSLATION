@@ -30,16 +30,21 @@ class HybridLoss(nn.Module):
         ce_loss = self.ce_loss(logits.view(-1, V), targets.view(-1))
         
         # CTC loss
-        ctc_loss = torch.tensor(0.0, device=logits.device)
+        ctc_loss = torch.tensor(0.0, device=logits.device, requires_grad=True)
         if 'ctc_logits' in outputs and self.ctc_weight > 0:
-            ctc_logits = outputs['ctc_logits']  # (B, T', V)
-            ctc_logits = ctc_logits.transpose(0, 1)  # (T', B, V)
+            ctc_logits = outputs['ctc_logits']  # Shape: (B, T, V)
+            ctc_logits = ctc_logits.transpose(0, 1)  # Transpose to (T, B, V) for CTC
             ctc_logits = F.log_softmax(ctc_logits, dim=-1)
             
-            # CTC expects targets without padding
+            # CTC expects flattened targets (1D) instead of padded (B, T)
+            flat_targets = []
+            for b in range(targets.size(0)):
+                flat_targets.extend(targets[b, :target_lengths[b]].cpu().tolist())
+            flat_targets = torch.tensor(flat_targets, dtype=torch.long, device=targets.device)
+            
             ctc_loss = self.ctc_loss(
                 ctc_logits,
-                targets,
+                flat_targets,
                 encoder_lengths,
                 target_lengths
             )

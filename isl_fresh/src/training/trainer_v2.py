@@ -120,8 +120,12 @@ class Trainer:
         
         pbar = tqdm(self.train_loader, desc=f"Epoch {epoch} [Train]")
         for batch_idx, batch in enumerate(pbar):
-            # Move data to device
-            features = batch['features'].to(self.device, non_blocking=True)
+            # Move data to device - handle both video and landmark datasets
+            if 'video_frames' in batch:
+                features = batch['video_frames'].to(self.device, non_blocking=True)
+            else:
+                features = batch['features'].to(self.device, non_blocking=True)
+            
             feature_lengths = batch['feature_lengths'].to(self.device, non_blocking=True)
             targets = batch['targets'].to(self.device, non_blocking=True)
             target_lengths = batch['target_lengths'].to(self.device, non_blocking=True)
@@ -131,12 +135,12 @@ class Trainer:
                 with autocast():
                     outputs = self.model(features, feature_lengths, targets, target_lengths)
                     losses = self.loss_fn(outputs, targets, target_lengths, outputs['encoder_lengths'])
-                    loss = losses['loss'] / self.grad_accum
+                    loss = losses['loss']
                 self.scaler.scale(loss).backward()
             else:
                 outputs = self.model(features, feature_lengths, targets, target_lengths)
                 losses = self.loss_fn(outputs, targets, target_lengths, outputs['encoder_lengths'])
-                loss = losses['loss'] / self.grad_accum
+                loss = losses['loss']
                 loss.backward()
             
             # Update metrics
@@ -206,7 +210,12 @@ class Trainer:
         
         pbar = tqdm(self.val_loader, desc="Validating")
         for batch in pbar:
-            features = batch['features'].to(self.device)
+            # Handle both video and landmark datasets
+            if 'video_frames' in batch:
+                features = batch['video_frames'].to(self.device)
+            else:
+                features = batch['features'].to(self.device)
+            
             feature_lengths = batch['feature_lengths'].to(self.device)
             targets = batch['targets'].to(self.device)
             target_lengths = batch['target_lengths'].to(self.device)
@@ -235,6 +244,9 @@ class Trainer:
             'top5_accuracy': total_topk_acc / num_batches
         })
         
+        # Reset metrics for next validation epoch
+        self.val_metrics.reset()
+        
         # Log to TensorBoard
         self.writer.add_scalar('val/loss', metrics['loss'], self.epoch)
         self.writer.add_scalar('val/token_accuracy', metrics['token_accuracy'], self.epoch)
@@ -243,12 +255,17 @@ class Trainer:
         self.writer.add_scalar('val/bleu', metrics['bleu'], self.epoch)
         self.writer.add_scalar('val/top5_accuracy', metrics['top5_accuracy'], self.epoch)
         
-        return metrics
-    
-    @torch.no_grad()
-    def sample_predictions(self, num_samples: int = 5):
-        """Generate and display sample predictions."""
         self.model.eval()
+        batch = next(iter(self.val_loader))
+        
+        # Handle both video and landmark datasets
+        if 'video_frames' in batch:
+            features = batch['video_frames'][:num_samples].to(self.device)
+        else:
+            features = batch['features'][:num_samples].to(self.device)
+        
+        feature_lengths = batch['feature_lengths'][:num_samples].to(self.device)
+        texts = batch['texts'][:num_samples]
         batch = next(iter(self.val_loader))
         
         features = batch['features'][:num_samples].to(self.device)
@@ -332,7 +349,7 @@ class Trainer:
         for epoch in range(self.epoch + 1, num_epochs + 1):
             self.epoch = epoch
             
-            # Callback for encoder unfreezing
+            # Callback for encoder unfreezing - call before training
             if hasattr(self.model, 'on_epoch_start'):
                 self.model.on_epoch_start(epoch)
             
@@ -372,9 +389,12 @@ class Trainer:
                 self.metrics_logger.plot_training_curves()
                 self.metrics_logger.save_metrics_csv()
             
-            # Early stopping
+            # Early stopping - BREAK the loop!
             if self.patience_counter >= self.patience:
                 print(f"\n⚠️ Early stopping triggered at epoch {epoch}!")
+                print(f"Best validation loss: {self.best_loss:.4f}")
+                print(f"Best BLEU score: {self.best_bleu:.2f}")
+                break  # Exit training loop
                 print(f"   No improvement for {self.patience} epochs.")
                 break
         

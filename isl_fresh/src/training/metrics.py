@@ -100,6 +100,8 @@ class TranslationMetrics:
             return 0.0
         
         def get_ngrams(words, n):
+            if len(words) < n:
+                return []
             return [tuple(words[i:i+n]) for i in range(len(words)-n+1)]
         
         precisions = []

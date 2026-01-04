@@ -18,9 +18,9 @@ os.environ['MEDIAPIPE_DISABLE_GPU'] = '0'  # Enable GPU
 import mediapipe as mp
 
 # Configuration - adjust paths for your Linux machine
-VIDEO_DIR = "/path/to/iSign-videos_v1.1"  # UPDATE THIS
-CSV_PATH = "/path/to/iSign_v1.1.csv"       # UPDATE THIS  
-OUTPUT_DIR = "/path/to/output/data"        # UPDATE THIS
+VIDEO_DIR = "/media/rvcse22/CSERV/kortex_sem5/videos/iSign-videos_v1.1"  # UPDATE THIS
+CSV_PATH = "/media/rvcse22/CSERV/kortex_sem5/nischal/training_by_surya/ISL_TRANSLATION/iSign_v1.1.csv"       # UPDATE THIS  
+OUTPUT_DIR = "/media/rvcse22/CSERV/kortex_sem5/nischal/training_by_surya/data"        # UPDATE THIS
 
 MAX_FRAMES = 200          # Frames per video
 FRAME_SKIP = 2            # Process every 2nd frame (still good quality)

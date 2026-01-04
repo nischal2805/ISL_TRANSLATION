@@ -30,12 +30,9 @@ class ISLDataset(Dataset):
         # Load landmarks
         landmarks = np.load(os.path.join(self.data_dir, f"{row['video_id']}.npy"))
         
-        # Add temporal features (velocity, acceleration)
-        velocity = np.zeros_like(landmarks)
-        velocity[1:] = landmarks[1:] - landmarks[:-1]
-        acceleration = np.zeros_like(landmarks)
-        acceleration[1:] = velocity[1:] - velocity[:-1]
-        features = np.concatenate([landmarks, velocity, acceleration], axis=-1)
+        # Use raw landmarks only (603 dims) - temporal features cause dimension mismatch
+        # TODO: Add temporal features in a separate feature path once dimension handling is fixed
+        features = landmarks
         
         # Pad/truncate
         seq_len = min(len(features), self.max_seq_len)
