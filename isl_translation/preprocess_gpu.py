@@ -75,6 +75,11 @@ class GPUConfig:
     # Processing
     use_cupy: bool = CUPY_AVAILABLE
     use_mixed_precision: bool = True  # FP16 for faster processing
+    
+    # DFPS (Dynamic Frame Pruning Strategy) settings
+    dfps_enabled: bool = True
+    dfps_threshold: float = 0.01  # Motion threshold for frame selection
+    dfps_min_frames: int = 10  # Minimum frames to retain
 
 
 gpu_config = GPUConfig()
@@ -331,44 +336,77 @@ class GPUFeatureProcessor:
 
 
 # Add DFPS function to filter frames based on significance
-def dynamic_frame_pruning(frames: List[np.ndarray], threshold: float = 0.1) -> List[np.ndarray]:
+# ...existing code...
+
+def dynamic_frame_pruning(
+    frames: List[np.ndarray], 
+    threshold: float = 0.01,  # Lower threshold for normalized coordinates
+    min_frames: int = 10,     # Minimum frames to keep
+    keep_every_n: int = 5     # Fallback: keep every Nth frame if pruning is too aggressive
+) -> List[np.ndarray]:
     """
     Apply Dynamic Frame Pruning Strategy (DFPS) to reduce redundant frames.
+    
+    This reduces temporal redundancy in sign language videos by keeping only
+    frames where significant motion occurs, improving training efficiency.
 
     Args:
         frames: List of frames (landmark arrays) to analyze.
-        threshold: Minimum change required to keep a frame (motion magnitude).
+        threshold: Minimum motion magnitude to keep a frame (for normalized 0-1 coords).
+        min_frames: Minimum number of frames to retain.
+        keep_every_n: If pruning results in < min_frames, keep every Nth frame instead.
 
     Returns:
         Pruned list of frames.
     """
+    if len(frames) <= min_frames:
+        return frames  # Don't prune if already at minimum
+    
     pruned_frames = [frames[0]]  # Always keep the first frame
+    pruned_indices = [0]
+    last_kept_frame = frames[0]
 
-    for i in range(1, len(frames)):
-        # Compute motion magnitude (Euclidean distance) between consecutive frames
-        motion_magnitude = np.linalg.norm(frames[i] - frames[i - 1])
+    for i in range(1, len(frames) - 1):  # Exclude last frame from loop
+        # Compute motion magnitude between current frame and last kept frame
+        # This prevents drift accumulation from comparing only consecutive frames
+        prev_flat = last_kept_frame.flatten()
+        curr_flat = frames[i].flatten()
+        
+        # Handle NaN values (when MediaPipe fails to detect landmarks)
+        valid_mask = ~(np.isnan(prev_flat) | np.isnan(curr_flat))
+        if np.sum(valid_mask) == 0:
+            # If all values are NaN, skip this frame
+            continue
+        
+        # Use mean absolute difference on valid values only
+        motion_magnitude = np.mean(np.abs(curr_flat[valid_mask] - prev_flat[valid_mask]))
 
         if motion_magnitude > threshold:
             pruned_frames.append(frames[i])
+            pruned_indices.append(i)
+            last_kept_frame = frames[i]  # Update reference frame
+
+    # Always keep the last frame (important for sign completion)
+    if len(frames) > 1 and (len(pruned_indices) == 0 or pruned_indices[-1] != len(frames) - 1):
+        pruned_frames.append(frames[-1])
+        pruned_indices.append(len(frames) - 1)
+
+    # Fallback: if too aggressive, use uniform sampling instead
+    if len(pruned_frames) < min_frames:
+        num_to_select = min(min_frames, len(frames))
+        indices = np.linspace(0, len(frames) - 1, num_to_select, dtype=int)
+        pruned_frames = [frames[i] for i in indices]
 
     return pruned_frames
 
-# Modify extract_landmarks_worker to include DFPS
+
 def extract_landmarks_worker(args: Tuple[str, str]) -> Optional[Tuple[str, np.ndarray]]:
     """
     Worker function for parallel landmark extraction with DFPS.
-    Runs in separate process to maximize CPU utilization.
-
-    Args:
-        args: (video_id, video_path)
-
-    Returns:
-        (video_id, landmarks) or None if extraction fails
     """
     video_id, video_path = args
 
     try:
-        # Initialize MediaPipe in worker process
         mp_holistic = mp_lib.solutions.holistic
         holistic = mp_holistic.Holistic(
             static_image_mode=landmark_config.static_image_mode,
@@ -379,7 +417,6 @@ def extract_landmarks_worker(args: Tuple[str, str]) -> Optional[Tuple[str, np.nd
             refine_face_landmarks=False
         )
 
-        # Try hardware-accelerated video decoding
         if gpu_config.use_nvdec:
             cap = cv2.VideoCapture(video_path, cv2.CAP_FFMPEG)
         else:
@@ -397,11 +434,8 @@ def extract_landmarks_worker(args: Tuple[str, str]) -> Optional[Tuple[str, np.nd
             if not ret:
                 break
 
-            # Process frame with MediaPipe
             frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             results = holistic.process(frame_rgb)
-
-            # Extract landmarks for the frame
             landmarks = _extract_frame_landmarks(results, pose_indices)
             landmarks_list.append(landmarks)
 
@@ -412,8 +446,16 @@ def extract_landmarks_worker(args: Tuple[str, str]) -> Optional[Tuple[str, np.nd
             print(f"Warning: No landmarks extracted for video {video_id}")
             return None
 
-        # Apply DFPS to reduce redundant frames
-        pruned_landmarks = dynamic_frame_pruning(landmarks_list, threshold=0.1)
+        # Apply DFPS with proper parameters (if enabled)
+        if gpu_config.dfps_enabled:
+            pruned_landmarks = dynamic_frame_pruning(
+                landmarks_list, 
+                threshold=gpu_config.dfps_threshold,
+                min_frames=max(gpu_config.dfps_min_frames, data_config.min_src_len),
+                keep_every_n=5
+            )
+        else:
+            pruned_landmarks = landmarks_list
 
         landmarks = np.stack(pruned_landmarks, axis=0).astype(np.float32)
         return (video_id, landmarks)
@@ -421,6 +463,7 @@ def extract_landmarks_worker(args: Tuple[str, str]) -> Optional[Tuple[str, np.nd
     except Exception as e:
         print(f"Error processing {video_id}: {e}")
         return None
+
 
 
 def _extract_frame_landmarks(results, pose_indices: List[int]) -> np.ndarray:
