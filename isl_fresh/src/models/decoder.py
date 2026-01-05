@@ -78,8 +78,8 @@ class TextDecoder(nn.Module):
     
     @torch.no_grad()
     def generate(self, encoder_out, encoder_lengths, max_len=100, bos_id=1, eos_id=2, 
-                 temperature=1.0, repetition_penalty=1.2):
-        """Greedy decoding with repetition penalty."""
+                 temperature=1.0, repetition_penalty=1.2, top_k=50, top_p=0.9):
+        """Sampling-based decoding with repetition penalty and nucleus sampling."""
         B = encoder_out.size(0)
         device = encoder_out.device
         
@@ -101,7 +101,29 @@ class TextDecoder(nn.Module):
                         else:
                             next_logits[b, token_id] *= repetition_penalty
             
-            next_token = next_logits.argmax(dim=-1, keepdim=True)
+            # Top-k filtering
+            if top_k > 0:
+                indices_to_remove = next_logits < torch.topk(next_logits, top_k)[0][..., -1, None]
+                next_logits[indices_to_remove] = float('-inf')
+            
+            # Top-p (nucleus) filtering
+            if top_p < 1.0:
+                sorted_logits, sorted_indices = torch.sort(next_logits, descending=True)
+                cumulative_probs = torch.cumsum(torch.softmax(sorted_logits, dim=-1), dim=-1)
+                
+                # Remove tokens with cumulative probability above threshold
+                sorted_indices_to_remove = cumulative_probs > top_p
+                # Keep at least 1 token
+                sorted_indices_to_remove[..., 0] = False
+                
+                for b in range(B):
+                    indices_to_remove = sorted_indices[b][sorted_indices_to_remove[b]]
+                    next_logits[b, indices_to_remove] = float('-inf')
+            
+            # Sample from the filtered distribution
+            probs = torch.softmax(next_logits, dim=-1)
+            next_token = torch.multinomial(probs, num_samples=1)
+            
             tokens = torch.cat([tokens, next_token], dim=1)
             
             if (next_token == eos_id).all():
