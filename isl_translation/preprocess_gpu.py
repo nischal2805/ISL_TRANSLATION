@@ -330,19 +330,43 @@ class GPUFeatureProcessor:
         return derivative
 
 
+# Add DFPS function to filter frames based on significance
+def dynamic_frame_pruning(frames: List[np.ndarray], threshold: float = 0.1) -> List[np.ndarray]:
+    """
+    Apply Dynamic Frame Pruning Strategy (DFPS) to reduce redundant frames.
+
+    Args:
+        frames: List of frames (landmark arrays) to analyze.
+        threshold: Minimum change required to keep a frame (motion magnitude).
+
+    Returns:
+        Pruned list of frames.
+    """
+    pruned_frames = [frames[0]]  # Always keep the first frame
+
+    for i in range(1, len(frames)):
+        # Compute motion magnitude (Euclidean distance) between consecutive frames
+        motion_magnitude = np.linalg.norm(frames[i] - frames[i - 1])
+
+        if motion_magnitude > threshold:
+            pruned_frames.append(frames[i])
+
+    return pruned_frames
+
+# Modify extract_landmarks_worker to include DFPS
 def extract_landmarks_worker(args: Tuple[str, str]) -> Optional[Tuple[str, np.ndarray]]:
     """
-    Worker function for parallel landmark extraction.
+    Worker function for parallel landmark extraction with DFPS.
     Runs in separate process to maximize CPU utilization.
-    
+
     Args:
         args: (video_id, video_path)
-        
+
     Returns:
         (video_id, landmarks) or None if extraction fails
     """
     video_id, video_path = args
-    
+
     try:
         # Initialize MediaPipe in worker process
         mp_holistic = mp_lib.solutions.holistic
@@ -354,45 +378,46 @@ def extract_landmarks_worker(args: Tuple[str, str]) -> Optional[Tuple[str, np.nd
             enable_segmentation=False,
             refine_face_landmarks=False
         )
-        
+
         # Try hardware-accelerated video decoding
         if gpu_config.use_nvdec:
             cap = cv2.VideoCapture(video_path, cv2.CAP_FFMPEG)
-            # Enable hardware acceleration if available
-            cap.set(cv2.CAP_PROP_HW_ACCELERATION, cv2.VIDEO_ACCELERATION_ANY)
         else:
             cap = cv2.VideoCapture(video_path)
-        
+
         if not cap.isOpened():
+            print(f"Error: Unable to open video {video_path}")
             return None
-        
+
         landmarks_list = []
         pose_indices = landmark_config.pose_indices
-        
+
         while True:
             ret, frame = cap.read()
             if not ret:
                 break
-            
-            # Convert BGR to RGB
-            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            
-            # Process with MediaPipe
-            results = holistic.process(rgb_frame)
-            
-            # Extract landmarks
-            frame_landmarks = _extract_frame_landmarks(results, pose_indices)
-            landmarks_list.append(frame_landmarks)
-        
+
+            # Process frame with MediaPipe
+            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            results = holistic.process(frame_rgb)
+
+            # Extract landmarks for the frame
+            landmarks = _extract_frame_landmarks(results, pose_indices)
+            landmarks_list.append(landmarks)
+
         cap.release()
         holistic.close()
-        
+
         if len(landmarks_list) == 0:
+            print(f"Warning: No landmarks extracted for video {video_id}")
             return None
-        
-        landmarks = np.stack(landmarks_list, axis=0).astype(np.float32)
+
+        # Apply DFPS to reduce redundant frames
+        pruned_landmarks = dynamic_frame_pruning(landmarks_list, threshold=0.1)
+
+        landmarks = np.stack(pruned_landmarks, axis=0).astype(np.float32)
         return (video_id, landmarks)
-        
+
     except Exception as e:
         print(f"Error processing {video_id}: {e}")
         return None
