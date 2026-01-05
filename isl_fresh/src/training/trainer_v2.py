@@ -349,7 +349,7 @@ class Trainer:
         if self.scaler:
             checkpoint['scaler_state_dict'] = self.scaler.state_dict()
         
-        # Save epoch checkpoint
+        # Save epoch checkpoint (keep ALL checkpoints now)
         torch.save(checkpoint, self.checkpoint_dir / f'checkpoint_epoch_{epoch}.pt')
         
         # Save best model by loss
@@ -362,10 +362,10 @@ class Trainer:
             torch.save(checkpoint, self.checkpoint_dir / 'best_model_bleu.pt')
             print("  💾 Best model (BLEU) saved!")
         
-        # Keep only last 3 checkpoints
-        checkpoints = sorted(self.checkpoint_dir.glob('checkpoint_epoch_*.pt'))
-        for old_ckpt in checkpoints[:-3]:
-            old_ckpt.unlink()
+        # REMOVED: Keep only last 3 checkpoints (now keeping all)
+        # checkpoints = sorted(self.checkpoint_dir.glob('checkpoint_epoch_*.pt'))
+        # for old_ckpt in checkpoints[:-3]:
+        #     old_ckpt.unlink()
     
     def train(self, num_epochs: int, resume_from: str = None):
         """Main training loop."""
